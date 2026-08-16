@@ -1,0 +1,153 @@
+# Rust Build Artifacts
+/target/
+Cargo.lock
+**/*.rlib
+**/*.rmeta
+**/*.so
+**/*.dylib
+**/*.dll
+**/*.exe
+.github
+
+# IDE & Editor
+.vscode/
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+*.code-workspace
+
+# Development & Local Overrides
+.env
+.env.local
+.env.*.local
+Cargo.toml.local
+
+# Patch overrides (for local sibling crate development)
+.git/info/exclude
+patch-crates-io.local.toml
+
+# Test & Fixture Artifacts
+**/tests/temp/
+**/tests/*.tmp
+tmp/
+temp/
+*.tmp
+test-output/
+
+# Test Repositories (ephemeral)
+**/tests/fixtures/**/.git/
+**/tests/fixtures/**/.gix/
+
+# Benchmark Results
+/target/criterion/
+*.json.bk
+benchmarks/results/
+
+# Coverage Reports
+coverage/
+*.profraw
+*.profdata
+tarpaulin-report.html
+llvm-cov/
+
+# Debug Symbols (optional, can be large)
+*.pdb
+*.dSYM/
+
+# Platform-Specific Binaries
+/target/debug/pi
+/target/debug/pi_legacy_capture
+/target/release/pi
+/target/release/pi_legacy_capture
+
+# SQLite Databases (local indexing caches)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite-wal
+
+# JavaScript/TypeScript Artifacts (if needed for sandbox testing)
+node_modules/
+dist/
+build/
+*.js.map
+*.ts.map
+
+# Python Artifacts (if used in build scripts or tests)
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.Python
+venv/
+env/
+
+# macOS Specific
+.AppleDouble
+.LSOverride
+._*
+.Spotlight-V100
+.Trashes
+.TemporaryItems
+
+# Windows Specific
+$RECYCLE.BIN/
+ehthumbs.db
+Desktop.ini
+*.lnk
+
+# Unix Specific
+*.swp
+*.swo
+*~
+.nfs*
+
+# Editor Backups
+*.bak
+*.backup
+*~
+
+# OS Generated Files
+.env.*.swp
+.DS_Store
+._.DS_Store
+*.orig
+
+# Build System Artifacts
+*.o
+*.a
+*.lib
+*.def
+*.exp
+
+# Miscellaneous
+.cargo/registry/cache/
+.cargo/git/db/
+.cargo/advisory-db/
+flamegraph.svg
+perf.data
+perf.data.old
+
+# Documentation Generated Files
+target/doc/
+docs/generated/
+
+# CI/CD Logs (if running locally)
+.github/workflows/*.log
+
+# Session/State Files
+.session/
+session-*.json
+
+# Temporary Task/Build Files
+.build-cache/
+.task-cache/
+*.task.json

@@ -1,0 +1,12 @@
+﻿[package]
+name = "hydra-cli"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pi_agent_rust = { path = "../../core/pi_agent" }
+hydra-matrix = { path = "../hydra-matrix" }
+hydra-sandbox = { path = "../hydra-sandbox" }
+hydra-dag = { path = "../hydra-dag" }
+tokio = { workspace = true }
+anyhow = { workspace = true }

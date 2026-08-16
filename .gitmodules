@@ -1,0 +1,3 @@
+[submodule "core/pi_agent"]
+	path = core/pi_agent
+	url = https://github.com/Akshay0831/pi_agent_rust
