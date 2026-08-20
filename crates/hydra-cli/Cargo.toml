@@ -10,3 +10,17 @@ hydra-sandbox = { path = "../hydra-sandbox" }
 hydra-dag = { path = "../hydra-dag" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+clap = { version = "4.5", features = ["derive"] }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = "0.1"
+futures = "0.3"
+pin-project-lite = "0.2"
+rand = "0.8"
+
+[dev-dependencies]
+tempfile = "3.27"
+
+[features]
+default = []
+integration-tests = []
