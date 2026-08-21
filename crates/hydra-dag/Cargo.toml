@@ -6,3 +6,11 @@ edition = "2021"
 [dependencies]
 tokio = { workspace = true }
 anyhow = { workspace = true }
+async-trait = "0.1"
+
+[dev-dependencies]
+tokio-test = "0.4"
+
+[features]
+default = []
+integration-tests = []

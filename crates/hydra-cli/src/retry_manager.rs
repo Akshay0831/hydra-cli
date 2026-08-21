@@ -28,7 +28,6 @@ impl From<InstantWrapper> for Option<Instant> {
         None
     }
 }
-use std::time::{Duration, Instant};
 
 /// Retry configuration for provider calls.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,7 +102,7 @@ impl ProviderState {
     /// Mark a failed call.
     pub fn mark_failure(&mut self, error: String) {
         self.consecutive_failures += 1;
-        self.last_failure = Some(Instant::now());
+        self.last_failure = Some(InstantWrapper::from(Instant::now()));
         self.failed_calls += 1;
         self.last_error = Some(error);
     }
