@@ -4,9 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 anyhow = { workspace = true }
 async-trait = "0.1"
+tokio-util = "0.7"
 
 [dev-dependencies]
 tokio-test = "0.4"

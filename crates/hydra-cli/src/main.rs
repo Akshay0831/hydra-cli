@@ -7,6 +7,38 @@ use clap::{Parser, Subcommand};
 use routing::{Candidate, RoutingConfig, RoutingRequest};
 use provider_adapter::ProviderAdapterFactory;
 use retry_manager::RetryManager;
+use hydra_dag::{Task, TaskGraph, ExecutionStrategy};
+use hydra_matrix::CodeMatrix;
+use hydra_sandbox::Sandbox;
+
+/// A simple task for demonstration purposes
+struct SimpleTask {
+    description: String,
+}
+
+impl SimpleTask {
+    fn new(description: String) -> Self {
+        Self { description }
+    }
+}
+
+#[async_trait::async_trait]
+impl Task for SimpleTask {
+    type Output = String;
+    
+    fn id(&self) -> String {
+        format!("task_{}", self.description.chars().take(10).collect::<String>())
+    }
+    
+    fn dependencies(&self) -> Vec<String> {
+        Vec::new()
+    }
+    
+    async fn execute(&self) -> Result<Self::Output> {
+        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
+        Ok(format!("Completed: {}", self.description))
+    }
+}
 
 #[derive(Debug, Parser)]
 #[command(name = "hydra", version, about = "Hydra agentic coding assistant")]
@@ -89,6 +121,38 @@ enum Command {
         #[arg(long = "candidate", value_parser = parse_candidate)]
         candidates: Vec<Candidate>,
     },
+    /// Execute a task with concurrent processing.
+    Execute {
+        /// Hydra routing configuration JSON file.
+        #[arg(long, default_value = "hydra.json")]
+        config: std::path::PathBuf,
+        /// Task description or code to execute.
+        #[arg(long)]
+        task: String,
+        /// Maximum concurrent tasks.
+        #[arg(long, default_value = "4")]
+        concurrency: usize,
+        /// Execution strategy: sequential | concurrent | parallel.
+        #[arg(long, default_value = "concurrent")]
+        strategy: String,
+    },
+    /// Index codebase for analysis.
+    Index {
+        /// Root directory to index.
+        #[arg(long, default_value = ".")]
+        root: std::path::PathBuf,
+        /// Output file for code index.
+        #[arg(long, default_value = "code_index.json")]
+        output: std::path::PathBuf,
+        /// Programming languages to index.
+        #[arg(long, value_delimiter = ',')]
+        languages: Vec<String>,
+    },
+    /// Execute JavaScript code in sandbox.
+    Js {
+        /// JavaScript code to execute.
+        code: String,
+    },
 }
 
 fn parse_candidate(value: &str) -> Result<Candidate, String> {
@@ -104,6 +168,28 @@ fn parse_candidate(value: &str) -> Result<Candidate, String> {
         model.unwrap_or_default().to_string(),
         profile.unwrap_or_default().to_string(),
     ))
+}
+
+fn parse_execution_strategy(strategy: &str) -> Result<ExecutionStrategy> {
+    match strategy {
+        "sequential" => Ok(ExecutionStrategy::Sequential),
+        "concurrent" => Ok(ExecutionStrategy::FailFast),
+        "parallel" => Ok(ExecutionStrategy::CollectFailures),
+        _ => Err(anyhow::anyhow!("Unknown execution strategy: {}", strategy)),
+    }
+}
+
+fn parse_languages(langs: &[String]) -> Vec<String> {
+    langs.iter()
+        .filter_map(|lang| match lang.as_str() {
+            "rs" => Some("rs".to_string()),
+            "js" => Some("js".to_string()),
+            "jsx" => Some("jsx".to_string()),
+            "ts" => Some("ts".to_string()),
+            "tsx" => Some("tsx".to_string()),
+            _ => None,
+        })
+        .collect()
 }
 
 #[tokio::main]
@@ -157,8 +243,8 @@ async fn main() -> Result<()> {
             }
         }
         Command::RetryStatus { config } => {
-            let configured = RoutingConfig::load(&config)?;
-            let mut manager = RetryManager::new(configured);
+            let _configured = RoutingConfig::load(&config)?;
+            let manager = RetryManager::new(_configured);
             
             println!("Provider retry/failover status:");
             for status in manager.get_provider_status() {
@@ -169,7 +255,7 @@ async fn main() -> Result<()> {
                     status.profile,
                     status.consecutive_failures,
                     status.successful_calls,
-                    status.last_failure.map(|t| t.elapsed().as_secs()).unwrap_or(0),
+                    status.last_failure.map(|t| t.timestamp_secs).unwrap_or(0),
                     status.consecutive_failures == 0
                 );
                 
@@ -212,6 +298,66 @@ async fn main() -> Result<()> {
                     candidate.provider, candidate.model, candidate.profile
                 );
             }
+        }
+        Command::Execute { config, task, concurrency, strategy } => {
+            let _configured = RoutingConfig::load(&config)?;
+            let strategy = parse_execution_strategy(&strategy)?;
+            
+            // Create a simple task using a boxed trait object
+            let task = Box::new(SimpleTask::new(task.to_string()));
+            let mut graph = TaskGraph::new();
+            graph.add_task(task)?;
+            
+            println!("Executing task with strategy: {:?} (concurrency: {})", strategy, concurrency);
+            
+            let results = graph.execute_concurrent(concurrency, strategy).await;
+            println!("Task execution completed with strategy: {:?}", results.strategy);
+            if !results.successful.is_empty() {
+                println!("Successfully completed tasks:");
+                for (task_id, result) in results.successful {
+                    println!("  {}: {}", task_id, result);
+                }
+            }
+            if !results.failed.is_empty() {
+                println!("Failed tasks:");
+                for (task_id, error) in results.failed {
+                    println!("  {}: {}", task_id, error);
+                }
+            }
+        }
+        Command::Index { root, output, languages } => {
+            let languages = parse_languages(&languages);
+            if languages.is_empty() {
+                println!("No valid languages specified, using all supported languages");
+            }
+            
+            let mut matrix = CodeMatrix::new()?;
+            println!("Indexing codebase at: {}", root.display());
+            
+            // Index files based on language filters
+            for file_path in std::fs::read_dir(&root)? {
+                let file_path = file_path?.path();
+                if file_path.is_file() {
+                    if languages.is_empty() || languages.contains(&file_path.extension().unwrap_or_default().to_string_lossy().to_string()) {
+                        matrix.index_file(&file_path).await?;
+                    }
+                }
+            }
+            
+            let stats = matrix.get_stats().await;
+            println!("Found {} indexed elements", stats.total_elements);
+            
+            // Save the index to file
+            let json = serde_json::to_string_pretty(&stats)?;
+            std::fs::write(&output, json)?;
+            println!("Code index saved to: {}", output.display());
+        }
+        Command::Js { code } => {
+            let mut sandbox = Sandbox::new()?;
+            println!("Executing JavaScript code in sandbox...");
+            
+            let result = sandbox.execute(&code).await;
+            println!("Execution result: {:?}", result);
         }
     }
     Ok(())

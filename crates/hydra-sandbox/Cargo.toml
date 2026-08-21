@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["full"] }
 anyhow = { workspace = true }
 uuid = { workspace = true }
+rquickjs = { version = "0.12.2", features = ["full", "futures"] }
+serde_json = { workspace = true }
+serde = { workspace = true }

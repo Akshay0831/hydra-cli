@@ -1,9 +1,13 @@
 ﻿use anyhow::Result;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use tokio::sync::RwLock;
+use serde::{Deserialize, Serialize};
+use walkdir::WalkDir;
+use glob::Pattern;
 
 /// A code element that can be indexed and searched
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodeElement {
     pub id: String,
     pub file_path: PathBuf,
@@ -16,7 +20,7 @@ pub struct CodeElement {
 }
 
 /// Types of code elements that can be indexed
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ElementType {
     Function,
     Method,
@@ -29,495 +33,491 @@ pub enum ElementType {
     Import,
     Class,
     Interface,
-    // Add more types as needed
+    TypeAlias,
+    Macro,
 }
 
-/// The main code index structure
-#[derive(Debug, Default)]
-pub struct CodeIndex {
-    elements: HashMap<String, CodeElement>,
-    file_indices: HashMap<PathBuf, Vec<String>>,
-    type_indices: HashMap<ElementType, Vec<String>>,
-    dependency_graph: HashMap<String, HashSet<String>>,
-}
-
-impl CodeIndex {
-    /// Create a new empty code index
-    pub fn new() -> Self {
-        Self::default()
-    }
-    
-    /// Index a code element
-    pub fn add_element(&mut self, element: CodeElement) -> Result<()> {
-        let element_id = element.id.clone();
-        
-        // Add to main elements index
-        self.elements.insert(element_id.clone(), element.clone());
-        
-        // Add to file index
-        self.file_indices
-            .entry(element.file_path.clone())
-            .or_default()
-            .push(element_id.clone());
-        
-        // Add to type index
-        self.type_indices
-            .entry(element.element_type.clone())
-            .or_default()
-            .push(element_id.clone());
-        
-        // Add to dependency graph
-        for dep in &element.dependencies {
-            self.dependency_graph
-                .entry(element_id.clone())
-                .or_default()
-                .insert(dep.clone());
+impl std::fmt::Display for ElementType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ElementType::Function => write!(f, "Function"),
+            ElementType::Method => write!(f, "Method"),
+            ElementType::Struct => write!(f, "Struct"),
+            ElementType::Enum => write!(f, "Enum"),
+            ElementType::Trait => write!(f, "Trait"),
+            ElementType::Module => write!(f, "Module"),
+            ElementType::Variable => write!(f, "Variable"),
+            ElementType::Constant => write!(f, "Constant"),
+            ElementType::Import => write!(f, "Import"),
+            ElementType::Class => write!(f, "Class"),
+            ElementType::Interface => write!(f, "Interface"),
+            ElementType::TypeAlias => write!(f, "TypeAlias"),
+            ElementType::Macro => write!(f, "Macro"),
         }
-        
-        Ok(())
-    }
-    
-    /// Get all elements in the index
-    pub fn get_elements(&self) -> &HashMap<String, CodeElement> {
-        &self.elements
-    }
-    
-    /// Get elements by file path
-    pub fn get_elements_by_file(&self, file_path: &Path) -> Vec<&CodeElement> {
-        self.file_indices
-            .get(file_path)
-            .map(|ids| ids.iter().filter_map(|id| self.elements.get(id)).collect())
-            .unwrap_or_default()
-    }
-    
-    /// Get elements by type
-    pub fn get_elements_by_type(&self, element_type: ElementType) -> Vec<&CodeElement> {
-        self.type_indices
-            .get(&element_type)
-            .map(|ids| ids.iter().filter_map(|id| self.elements.get(id)).collect())
-            .unwrap_or_default()
-    }
-    
-    /// Find elements by name (case-insensitive)
-    pub fn find_elements_by_name(&self, name: &str) -> Vec<&CodeElement> {
-        self.elements
-            .values()
-            .filter(|elem| elem.name.to_lowercase() == name.to_lowercase())
-            .collect()
-    }
-    
-    /// Find elements containing text in their content
-    pub fn find_elements_by_content(&self, text: &str) -> Vec<&CodeElement> {
-        self.elements
-            .values()
-            .filter(|elem| elem.content.contains(text))
-            .collect()
-    }
-    
-    /// Get dependencies for an element
-    pub fn get_dependencies(&self, element_id: &str) -> Option<&HashSet<String>> {
-        self.dependency_graph.get(element_id)
-    }
-    
-    /// Get dependents (elements that depend on this element)
-    pub fn get_dependents(&self, element_id: &str) -> Vec<&CodeElement> {
-        let dependents = self.dependency_graph
-            .iter()
-            .filter(|(_, deps)| deps.contains(element_id))
-            .map(|(id, _)| id.clone())
-            .collect::<Vec<_>>();
-        
-        dependents
-            .into_iter()
-            .filter_map(|id| self.elements.get(&id))
-            .collect()
-    }
-    
-    /// Check if an element exists in the index
-    pub fn contains(&self, element_id: &str) -> bool {
-        self.elements.contains_key(element_id)
-    }
-    
-    /// Get the total number of indexed elements
-    pub fn len(&self) -> usize {
-        self.elements.len()
-    }
-    
-    /// Check if the index is empty
-    pub fn is_empty(&self) -> bool {
-        self.elements.is_empty()
-    }
-    
-    /// Remove an element from the index
-    pub fn remove_element(&mut self, element_id: &str) -> Option<CodeElement> {
-        let element = self.elements.remove(element_id)?;
-        
-        // Remove from file index
-        if let Some(file_elements) = self.file_indices.get_mut(&element.file_path) {
-            file_elements.retain(|id| id != element_id);
-            if file_elements.is_empty() {
-                self.file_indices.remove(&element.file_path);
-            }
-        }
-        
-        // Remove from type index
-        if let Some(type_elements) = self.type_indices.get_mut(&element.element_type) {
-            type_elements.retain(|id| id != element_id);
-            if type_elements.is_empty() {
-                self.type_indices.remove(&element.element_type);
-            }
-        }
-        
-        // Remove from dependency graph
-        self.dependency_graph.remove(element_id);
-        
-        // Remove reverse dependencies
-        for (_, deps) in &mut self.dependency_graph {
-            deps.remove(element_id);
-        }
-        
-        Some(element)
     }
 }
 
-/// A context extraction utility
-pub struct ContextExtractor {
-    index: CodeIndex,
+/// Configuration for code indexing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct IndexConfig {
+    /// Paths to index (supports glob patterns)
+    pub paths: Vec<String>,
+    /// File patterns to include
+    pub include_patterns: Vec<String>,
+    /// File patterns to exclude
+    pub exclude_patterns: Vec<String>,
+    /// Maximum file size to index (in bytes)
+    pub max_file_size: usize,
+    /// Whether to follow symbolic links
+    pub follow_symlinks: bool,
+    /// Whether to index documentation
+    pub index_docs: bool,
 }
 
-impl ContextExtractor {
-    /// Create a new context extractor with an empty index
-    pub fn new() -> Self {
+impl Default for IndexConfig {
+    fn default() -> Self {
         Self {
-            index: CodeIndex::new(),
+            paths: vec!["./**/*".to_string()],
+            include_patterns: vec![
+                "*.rs".to_string(),
+                "*.js".to_string(),
+                "*.ts".to_string(),
+                "*.jsx".to_string(),
+                "*.tsx".to_string(),
+            ],
+            exclude_patterns: vec![
+                "**/node_modules/**".to_string(),
+                "**/target/**".to_string(),
+                "**/build/**".to_string(),
+                "**/dist/**".to_string(),
+                "**/.git/**".to_string(),
+            ],
+            max_file_size: 10 * 1024 * 1024, // 10MB
+            follow_symlinks: false,
+            index_docs: false,
+        }
+    }
+}
+
+/// The main code indexing engine
+pub struct CodeMatrix {
+    index: RwLock<HashMap<String, CodeElement>>,
+    config: IndexConfig,
+    language_parsers: HashMap<String, Box<dyn LanguageParser>>,
+}
+
+/// Trait for language-specific parsing
+pub trait LanguageParser: Send + Sync {
+    fn supported_extensions(&self) -> Vec<&str>;
+    fn parse_file(&self, file_path: &Path, content: &str) -> Result<Vec<CodeElement>>;
+    fn extract_dependencies(&self, content: &str) -> Result<Vec<String>>;
+}
+
+
+
+/// Language-specific parsers
+mod parsers {
+    use super::*;
+    
+    /// Simple placeholder parsers (temporary implementation)
+    pub struct RustParser;
+    pub struct JSTypeScriptParser;
+    
+    impl LanguageParser for RustParser {
+        fn supported_extensions(&self) -> Vec<&str> {
+            vec!["rs"]
+        }
+        
+        fn parse_file(&self, file_path: &Path, content: &str) -> Result<Vec<CodeElement>> {
+            let mut elements = Vec::new();
+            
+            // Simple text-based parsing for demo
+            for (line_num, line) in content.lines().enumerate() {
+                if line.trim().starts_with("fn ") {
+                    let name = line.trim().strip_prefix("fn ").unwrap().split('(').next().unwrap().trim();
+                    elements.push(CodeElement {
+                        id: format!("{}:{}:{}", file_path.display(), line_num, name),
+                        file_path: file_path.to_path_buf(),
+                        element_type: ElementType::Function,
+                        name: name.to_string(),
+                        line_number: line_num + 1,
+                        content: line.to_string(),
+                        dependencies: Vec::new(),
+                        metadata: HashMap::new(),
+                    });
+                } else if line.trim().starts_with("struct ") {
+                    let name = line.trim().strip_prefix("struct ").unwrap().split('{').next().unwrap().trim();
+                    elements.push(CodeElement {
+                        id: format!("{}:{}:{}", file_path.display(), line_num, name),
+                        file_path: file_path.to_path_buf(),
+                        element_type: ElementType::Struct,
+                        name: name.to_string(),
+                        line_number: line_num + 1,
+                        content: line.to_string(),
+                        dependencies: Vec::new(),
+                        metadata: HashMap::new(),
+                    });
+                } else if line.trim().starts_with("enum ") {
+                    let name = line.trim().strip_prefix("enum ").unwrap().split('{').next().unwrap().trim();
+                    elements.push(CodeElement {
+                        id: format!("{}:{}:{}", file_path.display(), line_num, name),
+                        file_path: file_path.to_path_buf(),
+                        element_type: ElementType::Enum,
+                        name: name.to_string(),
+                        line_number: line_num + 1,
+                        content: line.to_string(),
+                        dependencies: Vec::new(),
+                        metadata: HashMap::new(),
+                    });
+                }
+            }
+            
+            Ok(elements)
+        }
+        
+        fn extract_dependencies(&self, content: &str) -> Result<Vec<String>> {
+            let mut dependencies = Vec::new();
+            
+            // Simple use statement extraction
+            for line in content.lines() {
+                if line.trim().starts_with("use ") {
+                    let dep = line.trim().strip_prefix("use ").unwrap().trim_end_matches(';').trim();
+                    if !dep.is_empty() {
+                        dependencies.push(dep.to_string());
+                    }
+                }
+            }
+            
+            Ok(dependencies)
         }
     }
     
-    /// Create a new context extractor with an existing index
-    pub fn with_index(index: CodeIndex) -> Self {
-        Self { index }
+    impl LanguageParser for JSTypeScriptParser {
+        fn supported_extensions(&self) -> Vec<&str> {
+            vec!["js", "ts", "jsx", "tsx"]
+        }
+        
+        fn parse_file(&self, file_path: &Path, content: &str) -> Result<Vec<CodeElement>> {
+            let mut elements = Vec::new();
+            
+            // Simple text-based parsing for demo
+            for (line_num, line) in content.lines().enumerate() {
+                if line.trim().starts_with("function ") || line.trim().starts_with("const ") || line.trim().starts_with("let ") {
+                    let name = line
+                        .split_whitespace()
+                        .nth(1)
+                        .unwrap_or("")
+                        .split('(')
+                        .next()
+                        .unwrap_or("")
+                        .trim_end_matches(':')
+                        .trim();
+                    
+                    if !name.is_empty() {
+                        let element_type = if line.trim().starts_with("function ") {
+                            ElementType::Function
+                        } else if line.trim().contains("class ") {
+                            ElementType::Class
+                        } else {
+                            ElementType::Variable
+                        };
+                        
+                        elements.push(CodeElement {
+                            id: format!("{}:{}:{}", file_path.display(), line_num, name),
+                            file_path: file_path.to_path_buf(),
+                            element_type,
+                            name: name.to_string(),
+                            line_number: line_num + 1,
+                            content: line.to_string(),
+                            dependencies: Vec::new(),
+                            metadata: HashMap::new(),
+                        });
+                    }
+                }
+            }
+            
+            Ok(elements)
+        }
+        
+        fn extract_dependencies(&self, content: &str) -> Result<Vec<String>> {
+            let mut dependencies = Vec::new();
+            
+            // Simple import/require extraction
+            for line in content.lines() {
+                if line.trim().starts_with("import ") || line.trim().starts_with("const ") && line.contains("require(") {
+                    let dep = line
+                        .trim()
+                        .split('"')
+                        .nth(1)
+                        .unwrap_or("")
+                        .split("'")
+                        .next()
+                        .unwrap_or("");
+                    
+                    if !dep.is_empty() {
+                        dependencies.push(dep.to_string());
+                    }
+                }
+            }
+            
+            Ok(dependencies)
+        }
+    }
+}
+
+impl CodeMatrix {
+    /// Create a new CodeMatrix with default configuration
+    pub fn new() -> Result<Self> {
+        Self::with_config(IndexConfig::default())
     }
     
-    /// Extract context around a specific element
-    pub fn extract_context(&self, element_id: &str, context_lines: usize) -> Option<ContextInfo> {
-        let element = self.index.get_elements().get(element_id)?;
-        let file_elements = self.index.get_elements_by_file(&element.file_path);
+    /// Create a new CodeMatrix with custom configuration
+    pub fn with_config(config: IndexConfig) -> Result<Self> {
+        let mut language_parsers = HashMap::new();
+        language_parsers.insert("rs".to_string(), Box::new(parsers::RustParser) as Box<dyn LanguageParser>);
+        language_parsers.insert("js".to_string(), Box::new(parsers::JSTypeScriptParser) as Box<dyn LanguageParser>);
+        language_parsers.insert("jsx".to_string(), Box::new(parsers::JSTypeScriptParser) as Box<dyn LanguageParser>);
+        language_parsers.insert("ts".to_string(), Box::new(parsers::JSTypeScriptParser) as Box<dyn LanguageParser>);
+        language_parsers.insert("tsx".to_string(), Box::new(parsers::JSTypeScriptParser) as Box<dyn LanguageParser>);
         
-        // Find the element in the file elements
-        let element_position = file_elements
-            .iter()
-            .position(|elem| elem.id == element.id)?;
-        
-        // Get surrounding elements for context
-        let start = element_position.saturating_sub(context_lines);
-        let end = std::cmp::min(element_position + context_lines + 1, file_elements.len());
-        
-        // Clone the elements to create a new Vec<CodeElement>
-        let context_elements: Vec<CodeElement> = file_elements[start..end].iter().map(|&elem| elem.clone()).collect();
-        
-        Some(ContextInfo {
-            target_element: element.clone(),
-            context_elements,
-            file_path: element.file_path.clone(),
+        Ok(Self {
+            index: RwLock::new(HashMap::new()),
+            config,
+            language_parsers,
         })
     }
     
-    /// Extract context for dependencies
-    pub fn extract_dependency_context(&self, element_id: &str, context_lines: usize) -> Vec<ContextInfo> {
-        let mut contexts = Vec::new();
+    /// Index code from the configured paths
+    pub async fn index(&mut self) -> Result<usize> {
+        let mut indexed_files = 0;
+        let paths = self.config.paths.clone();
         
-        if let Some(dependencies) = self.index.get_dependencies(element_id) {
-            for dep_id in dependencies {
-                if let Some(context) = self.extract_context(dep_id, context_lines) {
-                    contexts.push(context);
+        for pattern in &paths {
+            let matched_files = self.collect_matching_files(pattern)?;
+            
+            for file_path in matched_files {
+                if self.should_index_file(&file_path).await? && self.index_file(&file_path).await? {
+                        indexed_files += 1;
+                    }
+            }
+        }
+        
+        Ok(indexed_files)
+    }
+    
+    /// Index a specific file
+    pub async fn index_file(&mut self, file_path: &Path) -> Result<bool> {
+        // Check file size
+        let metadata = tokio::fs::metadata(file_path).await?;
+        if metadata.len() > self.config.max_file_size as u64 {
+            return Ok(false);
+        }
+        
+        // Read file content
+        let content = tokio::fs::read_to_string(file_path).await?;
+        
+        // Get file extension
+        let extension = file_path.extension()
+            .and_then(|ext| ext.to_str())
+            .unwrap_or("");
+        
+        // Get appropriate parser
+        if let Some(parser) = self.language_parsers.get(extension) {
+            let elements = parser.parse_file(file_path, &content)?;
+            let dependencies = parser.extract_dependencies(&content)?;
+            
+            // Add elements to index
+            let mut index = self.index.write().await;
+            for mut element in elements {
+                element.dependencies = dependencies.clone();
+                index.insert(element.id.clone(), element);
+            }
+            
+            Ok(true)
+        } else {
+            Ok(false) // Unsupported file type
+        }
+    }
+    
+    /// Search for code elements matching the query
+    pub async fn search(&self, query: &str) -> Result<Vec<CodeElement>> {
+        let index = self.index.read().await;
+        let mut results = Vec::new();
+        
+        for element in index.values() {
+            if self.element_matches_query(element, query) {
+                results.push(element.clone());
+            }
+        }
+        
+        Ok(results)
+    }
+    
+    /// Search for code elements by type
+    pub async fn search_by_type(&self, element_type: ElementType) -> Result<Vec<CodeElement>> {
+        let index = self.index.read().await;
+        let mut results = Vec::new();
+        
+        for element in index.values() {
+            if element.element_type == element_type {
+                results.push(element.clone());
+            }
+        }
+        
+        Ok(results)
+    }
+    
+    /// Search for code elements by name
+    pub async fn search_by_name(&self, name: &str) -> Result<Vec<CodeElement>> {
+        let index = self.index.read().await;
+        let mut results = Vec::new();
+        
+        for element in index.values() {
+            if element.name.contains(name) {
+                results.push(element.clone());
+            }
+        }
+        
+        Ok(results)
+    }
+    
+    /// Find all dependencies for a code element
+    pub async fn find_dependencies(&self, element_id: &str) -> Result<Vec<CodeElement>> {
+        let index = self.index.read().await;
+        let mut dependencies = Vec::new();
+        
+        if let Some(element) = index.get(element_id) {
+            for dep_name in &element.dependencies {
+                for dep_element in index.values() {
+                    if dep_element.name.contains(dep_name) || dep_element.id.contains(dep_name) {
+                        dependencies.push(dep_element.clone());
+                    }
                 }
             }
         }
         
-        contexts
+        Ok(dependencies)
     }
     
-    /// Extract context for dependents
-    pub fn extract_dependent_context(&self, element_id: &str, context_lines: usize) -> Vec<ContextInfo> {
-        let mut contexts = Vec::new();
+    /// Find all dependents of a code element
+    pub async fn find_dependents(&self, element_id: &str) -> Result<Vec<CodeElement>> {
+        let index = self.index.read().await;
+        let mut dependents = Vec::new();
         
-        let dependents = self.index.get_dependents(element_id);
-        for dep in dependents {
-            if let Some(context) = self.extract_context(&dep.id, context_lines) {
-                contexts.push(context);
+        if let Some(element) = index.get(element_id) {
+            for dependent in index.values() {
+                if dependent.dependencies.contains(&element.name) || dependent.dependencies.contains(&element.id) {
+                    dependents.push(dependent.clone());
+                }
             }
         }
         
-        contexts
+        Ok(dependents)
     }
     
-    /// Get a reference to the underlying index
-    pub fn index(&self) -> &CodeIndex {
-        &self.index
+    /// Get the total number of indexed elements
+    pub async fn size(&self) -> usize {
+        self.index.read().await.len()
     }
     
-    /// Get a mutable reference to the underlying index
-    pub fn index_mut(&mut self) -> &mut CodeIndex {
-        &mut self.index
-    }
-}
-
-/// Context information for code elements
-#[derive(Debug, Clone)]
-pub struct ContextInfo {
-    pub target_element: CodeElement,
-    pub context_elements: Vec<CodeElement>,
-    pub file_path: PathBuf,
-}
-
-/// A code search utility
-pub struct CodeSearch {
-    index: CodeIndex,
-}
-
-impl CodeSearch {
-    /// Create a new code search utility
-    pub fn new(index: CodeIndex) -> Self {
-        Self { index }
+    /// Clear the index
+    pub async fn clear(&self) {
+        self.index.write().await.clear();
     }
     
-    /// Search for elements by name with fuzzy matching
-    pub fn search_by_name(&self, query: &str) -> Vec<&CodeElement> {
+    /// Get statistics about the index
+    pub async fn get_stats(&self) -> IndexStats {
+        let index = self.index.read().await;
+        let mut stats = IndexStats::default();
+        
+        for element in index.values() {
+            stats.total_elements += 1;
+            match element.element_type {
+                ElementType::Function => stats.functions += 1,
+                ElementType::Struct => stats.structs += 1,
+                ElementType::Enum => stats.enums += 1,
+                ElementType::Class => stats.classes += 1,
+                ElementType::Interface => stats.interfaces += 1,
+                ElementType::Trait => stats.traits += 1,
+                ElementType::Module => stats.modules += 1,
+                ElementType::Variable => stats.variables += 1,
+                ElementType::Constant => stats.constants += 1,
+                ElementType::Import => stats.imports += 1,
+                ElementType::Method | ElementType::TypeAlias | ElementType::Macro => {
+                    // Count in others
+                    stats.others += 1;
+                }
+            }
+            
+            stats.files.insert(element.file_path.clone());
+        }
+        
+        stats
+    }
+    
+    /// Collect matching files based on glob patterns
+    fn collect_matching_files(&self, pattern: &str) -> Result<Vec<PathBuf>> {
+        let mut files = Vec::new();
+        let pattern_obj = Pattern::new(pattern)?;
+        
+        for entry in WalkDir::new("./").into_iter().filter_entry(|e| {
+            if e.path().is_dir() && e.path().components().count() > 2 {
+                return !e.path().components().any(|c| c.as_os_str() == "node_modules");
+            }
+            true
+        }) {
+            let entry = entry?;
+            let path = entry.path();
+            
+            if path.is_file() && pattern_obj.matches(path.to_str().unwrap_or("")) {
+                    files.push(path.to_path_buf());
+                }
+        }
+        
+        Ok(files)
+    }
+    
+    /// Check if a file should be indexed based on configuration
+    async fn should_index_file(&self, file_path: &Path) -> Result<bool> {
+        let file_str = file_path.to_string_lossy().to_string();
+        
+        // Check include patterns
+        let should_include = self.config.include_patterns.is_empty() ||
+            self.config.include_patterns.iter().any(|pattern| {
+                Pattern::new(pattern).is_ok_and(|p| p.matches(&file_str))
+            });
+        
+        // Check exclude patterns
+        let should_exclude = self.config.exclude_patterns.iter().any(|pattern| {
+            Pattern::new(pattern).is_ok_and(|p| p.matches(&file_str))
+        });
+        
+        Ok(should_include && !should_exclude)
+    }
+    
+    /// Check if an element matches the search query
+    fn element_matches_query(&self, element: &CodeElement, query: &str) -> bool {
         let query_lower = query.to_lowercase();
-        self.index
-            .get_elements()
-            .values()
-            .filter(|elem| {
-                elem.name.to_lowercase().contains(&query_lower)
-            })
-            .collect()
-    }
-    
-    /// Search for elements by content with fuzzy matching
-    pub fn search_by_content(&self, query: &str) -> Vec<&CodeElement> {
-        let query_lower = query.to_lowercase();
-        self.index
-            .get_elements()
-            .values()
-            .filter(|elem| {
-                elem.content.to_lowercase().contains(&query_lower)
-            })
-            .collect()
-    }
-    
-    /// Search for elements by type
-    pub fn search_by_type(&self, element_type: ElementType) -> Vec<&CodeElement> {
-        self.index.get_elements_by_type(element_type)
-    }
-    
-    /// Find all elements that match a search pattern
-    pub fn search(&self, pattern: &SearchPattern) -> Vec<&CodeElement> {
-        match pattern {
-            SearchPattern::ByName(name) => self.search_by_name(name),
-            SearchPattern::ByContent(content) => self.search_by_content(content),
-            SearchPattern::ByType(element_type) => self.search_by_type(element_type.clone()),
-            SearchPattern::Combined { name, content, element_type } => {
-                let mut results = Vec::new();
-                
-                if let Some(name) = name {
-                    results.extend(self.search_by_name(name));
-                }
-                
-                if let Some(content) = content {
-                    results.extend(self.search_by_content(content));
-                }
-                
-                if let Some(element_type) = element_type {
-                    results.extend(self.search_by_type(element_type.clone()));
-                }
-                
-                // Remove duplicates
-                results.dedup();
-                results
-            }
-        }
+        element.name.to_lowercase().contains(&query_lower) ||
+        element.content.to_lowercase().contains(&query_lower) ||
+        element.element_type.to_string().to_lowercase().contains(&query_lower)
     }
 }
 
-/// Search patterns for code elements
-#[derive(Debug)]
-pub enum SearchPattern {
-    ByName(String),
-    ByContent(String),
-    ByType(ElementType),
-    Combined {
-        name: Option<String>,
-        content: Option<String>,
-        element_type: Option<ElementType>,
-    },
-}
-
-/// Initialize the hydra-matrix module
-pub fn init() {
-    // Initialize the module and register any global utilities
-    println!("Hydra matrix initialized");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use std::path::PathBuf;
-
-    #[test]
-    fn test_code_element_creation() {
-        let element = CodeElement {
-            id: "test_func".to_string(),
-            file_path: PathBuf::from("test.rs"),
-            element_type: ElementType::Function,
-            name: "test_function".to_string(),
-            line_number: 10,
-            content: "fn test_function() {}".to_string(),
-            dependencies: vec![],
-            metadata: HashMap::new(),
-        };
-        
-        assert_eq!(element.id, "test_func");
-        assert_eq!(element.name, "test_function");
-        assert_eq!(element.line_number, 10);
-    }
-
-    #[test]
-    fn test_code_index_operations() {
-        let mut index = CodeIndex::new();
-        
-        let element1 = CodeElement {
-            id: "func1".to_string(),
-            file_path: PathBuf::from("file1.rs"),
-            element_type: ElementType::Function,
-            name: "function1".to_string(),
-            line_number: 1,
-            content: "fn function1() {}".to_string(),
-            dependencies: vec!["dep1".to_string()],
-            metadata: HashMap::new(),
-        };
-        
-        let element2 = CodeElement {
-            id: "func2".to_string(),
-            file_path: PathBuf::from("file1.rs"),
-            element_type: ElementType::Function,
-            name: "function2".to_string(),
-            line_number: 2,
-            content: "fn function2() {}".to_string(),
-            dependencies: vec![],
-            metadata: HashMap::new(),
-        };
-        
-        // Add elements
-        assert!(index.add_element(element1.clone()).is_ok());
-        assert!(index.add_element(element2.clone()).is_ok());
-        
-        // Check element count
-        assert_eq!(index.len(), 2);
-        assert!(!index.is_empty());
-        
-        // Check file index
-        let file_elements = index.get_elements_by_file(&PathBuf::from("file1.rs"));
-        assert_eq!(file_elements.len(), 2);
-        
-        // Check type index
-        let function_elements = index.get_elements_by_type(ElementType::Function);
-        assert_eq!(function_elements.len(), 2);
-        
-        // Check dependencies
-        let deps = index.get_dependencies("func1");
-        assert!(deps.is_some());
-        assert!(deps.unwrap().contains("dep1"));
-        
-        // Remove element
-        assert!(index.contains("func1"));
-        let removed = index.remove_element("func1");
-        assert!(removed.is_some());
-        assert!(!index.contains("func1"));
-    }
-
-    #[test]
-    fn test_context_extractor() {
-        let mut index = CodeIndex::new();
-        
-        let element = CodeElement {
-            id: "test_func".to_string(),
-            file_path: PathBuf::from("test.rs"),
-            element_type: ElementType::Function,
-            name: "test_function".to_string(),
-            line_number: 5,
-            content: "fn test_function() {}".to_string(),
-            dependencies: vec![],
-            metadata: HashMap::new(),
-        };
-        
-        index.add_element(element).unwrap();
-        
-        let extractor = ContextExtractor::with_index(index);
-        
-        // Extract context for existing element
-        let context = extractor.extract_context("test_func", 2);
-        assert!(context.is_some());
-        assert_eq!(context.unwrap().target_element.id, "test_func");
-        
-        // Extract context for non-existing element
-        let context = extractor.extract_context("nonexistent", 2);
-        assert!(context.is_none());
-    }
-
-    #[test]
-    fn test_code_search() {
-        let mut index = CodeIndex::new();
-        
-        let element1 = CodeElement {
-            id: "func1".to_string(),
-            file_path: PathBuf::from("file1.rs"),
-            element_type: ElementType::Function,
-            name: "calculate_sum".to_string(),
-            line_number: 1,
-            content: "fn calculate_sum(a: i32, b: i32) -> i32 { a + b }".to_string(),
-            dependencies: vec![],
-            metadata: HashMap::new(),
-        };
-        
-        let element2 = CodeElement {
-            id: "struct1".to_string(),
-            file_path: PathBuf::from("file1.rs"),
-            element_type: ElementType::Struct,
-            name: "User".to_string(),
-            line_number: 10,
-            content: "struct User { name: String, age: u32 }".to_string(),
-            dependencies: vec![],
-            metadata: HashMap::new(),
-        };
-        
-        index.add_element(element1).unwrap();
-        index.add_element(element2).unwrap();
-        
-        let search = CodeSearch::new(index);
-        
-        // Search by name
-        let results = search.search_by_name("calculate");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "func1");
-        
-        // Search by content
-        let results = search.search_by_content("String");
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "struct1");
-        
-        // Search by type
-        let results = search.search_by_type(ElementType::Function);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "func1");
-        
-        // Combined search
-        let pattern = SearchPattern::Combined {
-            name: Some("calculate".to_string()),
-            content: None,
-            element_type: None,
-        };
-        let results = search.search(&pattern);
-        assert_eq!(results.len(), 1);
-        assert_eq!(results[0].id, "func1");
-    }
+/// Statistics about the code index
+#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+pub struct IndexStats {
+    pub total_elements: usize,
+    pub functions: usize,
+    pub structs: usize,
+    pub enums: usize,
+    pub classes: usize,
+    pub interfaces: usize,
+    pub traits: usize,
+    pub modules: usize,
+    pub variables: usize,
+    pub constants: usize,
+    pub imports: usize,
+    pub others: usize,
+    pub files: HashSet<PathBuf>,
 }

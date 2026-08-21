@@ -1,10 +1,10 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize)]
 pub struct Candidate {
     pub provider: String,
     pub model: String,
@@ -14,7 +14,9 @@ pub struct Candidate {
     #[serde(default)]
     pub capabilities: Vec<String>,
     #[serde(default)]
-    pub priority: u32,
+    pub required_capabilities: Vec<String>, // Additional required capabilities beyond tools
+    #[serde(default)]
+    pub preference: u32, // User preference for this candidate
     #[serde(default = "default_health")]
     pub healthy: bool,
 }
@@ -35,6 +37,33 @@ pub struct ResolvedCredential {
     pub value: String,
 }
 
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+pub enum Capability {
+    Tool(String), // External tool access
+    Streaming,    // Streaming responses supported
+    StructuredOutput, // Structured JSON output
+    Reasoning,    // Reasoning capabilities
+    ContextLarge, // Large context window
+    Vision,       // Image input support
+    CodeExecution, // Code execution capability
+    // Add more as needed
+}
+
+impl Capability {
+    pub fn from_str(s: &str) -> Result<Self> {
+        match s {
+            "tool" => Ok(Capability::Tool(s.to_string())),
+            "streaming" => Ok(Capability::Streaming),
+            "structured" => Ok(Capability::StructuredOutput),
+            "reasoning" => Ok(Capability::Reasoning),
+            "large-context" => Ok(Capability::ContextLarge),
+            "vision" => Ok(Capability::Vision),
+            "code-execution" => Ok(Capability::CodeExecution),
+            _ => anyhow::bail!("unknown capability: {}", s),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub enum CredentialSource {
     Environment(String),
@@ -51,6 +80,27 @@ pub struct RoutingConfig {
     pub candidates: Vec<Candidate>,
     #[serde(default)]
     pub profiles: HashMap<String, Profile>,
+    #[serde(default)]
+    pub fallback_mode: FallbackMode,
+}
+
+/// Strategy for handling fallback when primary candidates fail
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+pub enum FallbackMode {
+    /// Only use explicitly specified candidates
+    Strict,
+    /// Use lower-priority candidates from the same provider
+    Provider,
+    /// Use any lower-priority candidate
+    Any,
+    /// Don't attempt fallback, just report the error
+    None,
+}
+
+impl Default for FallbackMode {
+    fn default() -> Self {
+        FallbackMode::Any
+    }
 }
 
 impl RoutingConfig {
@@ -89,8 +139,8 @@ impl RoutingConfig {
         let mut selected = resolve_configured(&self.candidates, &self.profiles, request);
         selected.extend(resolve(additional, request));
         selected.sort_by(|left, right| {
-            left.priority
-                .cmp(&right.priority)
+            right.preference
+                .cmp(&left.preference)
                 .then_with(|| left.provider.cmp(&right.provider))
                 .then_with(|| left.model.cmp(&right.model))
                 .then_with(|| left.profile.cmp(&right.profile))
@@ -170,8 +220,41 @@ impl Candidate {
             profile,
             purposes: Vec::new(),
             capabilities: Vec::new(),
-            priority: 0,
+            required_capabilities: Vec::new(),
+            preference: 0,
             healthy: true,
+        }
+    }
+
+    /// Add a capability to this candidate
+    pub fn with_capability(mut self, capability: Capability) -> Self {
+        self.capabilities.push(capability.to_string());
+        self
+    }
+
+    /// Add a required capability to this candidate
+    pub fn with_required_capability(mut self, capability: Capability) -> Self {
+        self.required_capabilities.push(capability.to_string());
+        self
+    }
+
+    /// Set preference level (higher = preferred)
+    pub fn with_preference(mut self, preference: u32) -> Self {
+        self.preference = preference;
+        self
+    }
+}
+
+impl Capability {
+    fn to_string(&self) -> String {
+        match self {
+            Capability::Tool(tool) => format!("tool:{}", tool),
+            Capability::Streaming => "streaming".to_string(),
+            Capability::StructuredOutput => "structured".to_string(),
+            Capability::Reasoning => "reasoning".to_string(),
+            Capability::ContextLarge => "large-context".to_string(),
+            Capability::Vision => "vision".to_string(),
+            Capability::CodeExecution => "code-execution".to_string(),
         }
     }
 }
@@ -186,8 +269,7 @@ pub struct RoutingRequest {
 }
 
 pub fn resolve(candidates: &[Candidate], request: &RoutingRequest) -> Vec<Candidate> {
-    let required_tools: HashSet<&str> = request.required_tools.iter().map(String::as_str).collect();
-    let mut eligible: Vec<Candidate> = candidates
+    let eligible: Vec<Candidate> = candidates
         .iter()
         .filter(|candidate| candidate.healthy)
         .filter(|candidate| {
@@ -197,38 +279,64 @@ pub fn resolve(candidates: &[Candidate], request: &RoutingRequest) -> Vec<Candid
             })
         })
         .filter(|candidate| {
-            required_tools
-                .iter()
-                .all(|tool| candidate.capabilities.iter().any(|item| item == tool))
+            // Check if all required tools are supported
+            request.required_tools.iter().all(|tool| 
+                candidate.capabilities.iter().any(|cap| cap == tool)
+            )
         })
         .filter(|candidate| {
-            request
-                .provider
-                .as_ref()
-                .is_none_or(|provider| &candidate.provider == provider)
+            // Check explicit provider filter
+            request.provider.as_ref().is_none_or(|provider| 
+                &candidate.provider == provider
+            )
         })
         .filter(|candidate| {
-            request
-                .model
-                .as_ref()
-                .is_none_or(|model| &candidate.model == model)
+            // Check explicit model filter
+            request.model.as_ref().is_none_or(|model| 
+                &candidate.model == model
+            )
         })
         .filter(|candidate| {
-            request
-                .profile
-                .as_ref()
-                .is_none_or(|profile| &candidate.profile == profile)
+            // Check explicit profile filter
+            request.profile.as_ref().is_none_or(|profile| 
+                &candidate.profile == profile
+            )
         })
         .cloned()
         .collect();
-    eligible.sort_by(|left, right| {
-        left.priority
-            .cmp(&right.priority)
+    
+    // Remove duplicates by keeping the highest preference for each (provider, model, profile) tuple
+    let mut deduplicated = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    
+    for candidate in eligible {
+        let key = (candidate.provider.clone(), candidate.model.clone(), candidate.profile.clone());
+        if !seen.contains(&key) {
+            seen.insert(key);
+            deduplicated.push(candidate);
+        } else {
+            // If we've seen this combination before, keep the one with higher preference
+            if let Some(existing) = deduplicated.iter_mut().find(|c| {
+                c.provider == candidate.provider && 
+                c.model == candidate.model && 
+                c.profile == candidate.profile
+            }) {
+                if candidate.preference > existing.preference {
+                    *existing = candidate;
+                }
+            }
+        }
+    }
+    
+    // Sort by precedence: preference > provider > model > profile
+    deduplicated.sort_by(|left, right| {
+        right.preference.cmp(&left.preference)  // Higher preference first
             .then_with(|| left.provider.cmp(&right.provider))
             .then_with(|| left.model.cmp(&right.model))
             .then_with(|| left.profile.cmp(&right.profile))
     });
-    eligible
+    
+    deduplicated
 }
 
 fn resolve_configured(
@@ -288,13 +396,13 @@ mod tests {
             "model".to_string(),
             "backup".to_string(),
         );
-        second.priority = 2;
+        second = second.with_preference(2);
         let mut first = Candidate::new(
             "openai".to_string(),
             "model".to_string(),
             "primary".to_string(),
         );
-        first.priority = 1;
+        first = first.with_preference(1);
         assert_eq!(
             resolve(&[second.clone(), first.clone()], &RoutingRequest::default()),
             vec![first, second]

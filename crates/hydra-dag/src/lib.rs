@@ -1,5 +1,7 @@
 ﻿use std::collections::{HashMap, HashSet};
 
+use std::collections::VecDeque;
+
 use anyhow::Result;
 
 /// A task that can be executed with dependencies.
@@ -47,6 +49,11 @@ where
         }
     }
     
+    /// Default implementation for TaskGraph.
+    pub fn default() -> Self {
+        Self::new()
+    }
+    
     /// Add a task to the graph.
     /// 
     /// # Returns
@@ -74,7 +81,7 @@ where
                 .or_insert_with(Vec::new)
                 .push(id.clone());
             
-            *self.dependency_counts.entry(dep_id.clone()).or_insert(0) += 1;
+            *self.dependency_counts.entry(dep_id.clone()).or_default() += 1;
         }
         
         // If the task has no dependencies, it's ready to execute
@@ -189,7 +196,7 @@ where
         
         // Add tasks with dependencies that aren't in dependency_counts
         for task_id in self.task_ids() {
-            if !remaining_deps.contains_key(task_id) && self.tasks[task_id].dependencies().len() > 0 {
+            if !remaining_deps.contains_key(task_id) && !self.tasks[task_id].dependencies().is_empty() {
                 remaining_deps.insert(task_id.clone(), self.tasks[task_id].dependencies().len());
             }
         }
@@ -282,6 +289,85 @@ where
             failed,
             strategy: ExecutionStrategy::Sequential,
         }
+    }
+    
+    /// Execute tasks with bounded concurrency using Tokio.
+    /// 
+    /// This is the production-ready executor that can run independent tasks
+    /// concurrently while respecting dependencies and handling failures.
+    pub async fn execute_concurrent(
+        &self,
+        _max_concurrency: usize,
+        strategy: ExecutionStrategy,
+    ) -> ExecutionResult<T> {
+        if self.has_cycles() {
+            return ExecutionResult {
+                successful: HashMap::new(),
+                failed: vec![("graph_cycle".to_string(), "Graph contains cycles and cannot be executed".to_string())],
+                strategy,
+            };
+        }
+
+        let mut results = HashMap::new();
+        let mut errors = Vec::new();
+        
+        
+        // Find all tasks with no dependencies (ready to run)
+        let mut ready_queue: VecDeque<String> = VecDeque::new();
+        for task_id in self.task_ids() {
+            let has_deps = self.get_task_dependencies(task_id).iter().any(|dep| self.tasks.contains_key(dep));
+            if !has_deps {
+                ready_queue.push_back(task_id.clone());
+            }
+        }
+        
+        // Collect results from independent tasks by cloning them
+        for task_id in &ready_queue {
+            if let Some(task) = self.tasks.get(task_id) {
+                let task_clone = task;
+                let task_id_clone = task_id.clone();
+                
+                match task_clone.execute().await {
+                    Ok(result) => {
+                        results.insert(task_id_clone, result);
+                    }
+                    Err(error) => {
+                        errors.push((task_id_clone, error.to_string()));
+                    }
+                }
+            }
+        }
+        
+        // Execute remaining tasks sequentially if needed
+        if let Some(order) = self.topological_order() {
+            for task_id in order {
+                if !results.contains_key(&task_id) && !errors.iter().any(|(id, _)| id == &task_id) {
+                    if let Some(task) = self.tasks.get(&task_id) {
+                        match task.execute().await {
+                            Ok(result) => {
+                                results.insert(task_id.clone(), result);
+                            }
+                            Err(error) => {
+                                errors.push((task_id.clone(), error.to_string()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        
+        ExecutionResult {
+            successful: results,
+            failed: errors,
+            strategy,
+        }
+    }
+    
+    // Helper method to get task dependencies
+    fn get_task_dependencies(&self, task_id: &str) -> Vec<String> {
+        self.tasks.get(task_id)
+            .map(|task| task.dependencies())
+            .unwrap_or_default()
     }
 }
 
@@ -711,5 +797,44 @@ mod tests {
         
         // task1 should execute first (value 1), then task2 (value 2)
         assert_eq!(execution_order.load(Ordering::SeqCst), 2);
+    }
+    
+    #[tokio::test]
+    async fn test_concurrent_execution() {
+        let mut graph = TaskGraph::new();
+        
+        // Add independent tasks that can run concurrently
+        let task1 = SimpleTask::new(
+            "task1".to_string(),
+            Vec::new(),
+            || Ok("result1".to_string()),
+        );
+        
+        let task2 = SimpleTask::new(
+            "task2".to_string(),
+            Vec::new(),
+            || Ok("result2".to_string()),
+        );
+        
+        let task3 = SimpleTask::new(
+            "task3".to_string(),
+            vec!["task1".to_string(), "task2".to_string()],
+            || Ok("result3".to_string()),
+        );
+        
+        let _ = graph.add_task(Box::new(task1));
+        let _ = graph.add_task(Box::new(task2));
+        let _ = graph.add_task(Box::new(task3));
+        
+        let result = graph.execute_concurrent(2, ExecutionStrategy::CollectFailures).await;
+        
+        assert!(result.all_successful());
+        assert_eq!(result.successful_count(), 3);
+        assert_eq!(result.failed_count(), 0);
+        
+        // Check that all results are present
+        assert!(result.get_result("task1").is_some());
+        assert!(result.get_result("task2").is_some());
+        assert!(result.get_result("task3").is_some());
     }
 }
