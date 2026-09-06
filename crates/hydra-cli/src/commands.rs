@@ -31,10 +31,28 @@ fn parse_candidate(value: &str) -> Result<Candidate, String> {
     ))
 }
 
+fn redact_provider_error(error: &str, secret: &str) -> String {
+    if secret.is_empty() {
+        return error.to_string();
+    }
+    error.replace(secret, "[redacted]")
+}
+
 /// Simple task implementation for DAG execution
 struct SimpleTask {
     description: String,
     context: ErrorContext,
+}
+
+struct PromptOptions {
+    config: std::path::PathBuf,
+    message: String,
+    tools: Option<Vec<String>>,
+    provider: Option<String>,
+    model: Option<String>,
+    profile: Option<String>,
+    purpose: Option<String>,
+    required_capabilities: Vec<String>,
 }
 
 impl SimpleTask {
@@ -185,6 +203,8 @@ pub enum CommandHandler {
     },
     /// Send a coding request through the configured upstream agent.
     Prompt {
+        #[arg(long, default_value = "hydra.json")]
+        config: std::path::PathBuf,
         #[arg(value_name = "MESSAGE")]
         message: String,
         #[arg(long, value_delimiter = ',')]
@@ -193,6 +213,12 @@ pub enum CommandHandler {
         provider: Option<String>,
         #[arg(long)]
         model: Option<String>,
+        #[arg(long)]
+        profile: Option<String>,
+        #[arg(long)]
+        purpose: Option<String>,
+        #[arg(long = "required-capability")]
+        required_capabilities: Vec<String>,
     },
     /// List tools available to the upstream agent.
     Tools,
@@ -264,11 +290,30 @@ impl CommandHandler {
             } => self.index(root, output, languages.clone(), feedback).await,
             CommandHandler::Js { code } => self.js(code, feedback).await,
             CommandHandler::Prompt {
+                config,
                 message,
                 tools,
                 provider,
                 model,
-            } => self.prompt(message, tools, provider, model, feedback).await,
+                profile,
+                purpose,
+                required_capabilities,
+            } => {
+                self.prompt(
+                    PromptOptions {
+                        config: config.clone(),
+                        message: message.clone(),
+                        tools: tools.clone(),
+                        provider: provider.clone(),
+                        model: model.clone(),
+                        profile: profile.clone(),
+                        purpose: purpose.clone(),
+                        required_capabilities: required_capabilities.clone(),
+                    },
+                    feedback,
+                )
+                .await
+            }
             CommandHandler::Tools => self.tools(feedback).await,
         }
     }
@@ -515,6 +560,7 @@ impl CommandHandler {
         let request = RoutingRequest {
             purpose,
             required_tools: tools,
+            required_capabilities,
             provider,
             model,
             profile,
@@ -756,35 +802,128 @@ impl CommandHandler {
 
     async fn prompt(
         &self,
-        message: &str,
-        tools: &Option<Vec<String>>,
-        provider: &Option<String>,
-        model: &Option<String>,
-        _feedback: &mut CliFeedback,
+        options: PromptOptions,
+        feedback: &mut CliFeedback,
     ) -> Result<(), HydraCliError> {
-        let enabled_tools = tools.clone().unwrap_or_else(|| {
+        let configured = RoutingConfig::load(&options.config)?;
+        let enabled_tools = options.tools.clone().unwrap_or_else(|| {
             AgentAdapter::builtin_tool_names()
                 .iter()
                 .map(|name| (*name).to_string())
                 .collect()
         });
-        AgentAdapter::prompt(
-            PromptRequest {
-                message: message.to_string(),
-                tools: enabled_tools,
-                provider: provider.clone(),
-                model: model.clone(),
-                working_directory: std::env::current_dir().map_err(HydraCliError::Io)?,
+        let request = RoutingRequest {
+            purpose: options.purpose.clone(),
+            required_tools: options.tools.clone().unwrap_or_default(),
+            required_capabilities: options.required_capabilities.clone(),
+            provider: options.provider.clone(),
+            model: options.model.clone(),
+            profile: options.profile.clone(),
+        };
+        let mut factory = ProviderAdapterFactory::new(configured.clone());
+        for provider_name in configured
+            .profiles()
+            .into_iter()
+            .flat_map(|profile| profile.providers)
+        {
+            factory.register_provider(provider_name.clone(), provider_name);
+        }
+        let mut retry_manager = RetryManager::with_config(
+            configured.clone(),
+            crate::retry_manager::RetryConfig {
+                enable_jitter: false,
+                ..Default::default()
             },
-            |delta| {
-                print!("{delta}");
-                let _ = std::io::Write::flush(&mut std::io::stdout());
-            },
+        );
+        let candidates = retry_manager.get_healthy_candidates(&request, &[]);
+        if candidates.is_empty() {
+            return Err(HydraCliError::NoEligibleCandidate {
+                request: format!(
+                    "provider={:?}, model={:?}, profile={:?}",
+                    options.provider, options.model, options.profile
+                ),
+            });
+        }
+        let working_directory = std::env::current_dir().map_err(HydraCliError::Io)?;
+        feedback.start_spinner("Routing prompt".to_string());
+        let mut last_error = None;
+
+        for candidate in candidates {
+            let adapter = match factory.create_adapter(&candidate).await {
+                Ok(adapter) => adapter,
+                Err(error) => {
+                    feedback.stop_spinner();
+                    return Err(HydraCliError::ProviderAttempt {
+                        candidate: format!(
+                            "{}/{}/{}",
+                            candidate.provider, candidate.model, candidate.profile
+                        ),
+                        attempt: 1,
+                        error: error.to_string(),
+                    });
+                }
+            };
+            let Some(adapter) = adapter else {
+                continue;
+            };
+            retry_manager.get_or_create_state(&candidate);
+            for attempt in 1..=retry_manager.retry_config.max_attempts {
+                feedback.update_spinner(format!(
+                    "Trying {}/{} (attempt {attempt})",
+                    adapter.provider(),
+                    adapter.model()
+                ));
+                let result = AgentAdapter::prompt(
+                    PromptRequest {
+                        message: options.message.clone(),
+                        tools: enabled_tools.clone(),
+                        provider: Some(adapter.provider().to_string()),
+                        model: Some(adapter.model().to_string()),
+                        api_key: Some(adapter.api_key().to_string()),
+                        working_directory: working_directory.clone(),
+                    },
+                    |delta| {
+                        print!("{delta}");
+                        let _ = std::io::Write::flush(&mut std::io::stdout());
+                    },
+                )
+                .await;
+                match result {
+                    Ok(()) => {
+                        retry_manager.mark_success(&candidate);
+                        feedback.stop_spinner();
+                        println!();
+                        return Ok(());
+                    }
+                    Err(error) => {
+                        let error_message =
+                            redact_provider_error(&error.to_string(), adapter.api_key());
+                        let error = HydraCliError::ProviderAttempt {
+                            candidate: format!(
+                                "{}/{}/{}",
+                                candidate.provider, candidate.model, candidate.profile
+                            ),
+                            attempt,
+                            error: error_message,
+                        };
+                        let retryable =
+                            ErrorHandler::new(0, Default::default()).is_retryable(&error);
+                        retry_manager.mark_failure(&candidate, error.to_string());
+                        last_error = Some(error);
+                        if !retryable || attempt == retry_manager.retry_config.max_attempts {
+                            break;
+                        }
+                        tokio::time::sleep(retry_manager.get_backoff_duration(&candidate)).await;
+                    }
+                }
+            }
+        }
+        feedback.stop_spinner();
+        Err(
+            last_error.unwrap_or_else(|| HydraCliError::NoEligibleCandidate {
+                request: "all eligible provider adapters were unavailable".to_string(),
+            }),
         )
-        .await
-        .map_err(|error| HydraCliError::Provider(error.to_string()))?;
-        println!();
-        Ok(())
     }
 
     async fn tools(&self, _feedback: &mut CliFeedback) -> Result<(), HydraCliError> {

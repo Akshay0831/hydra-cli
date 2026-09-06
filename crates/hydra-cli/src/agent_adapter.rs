@@ -11,6 +11,7 @@ pub struct PromptRequest {
     pub tools: Vec<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
+    pub api_key: Option<String>,
     pub working_directory: PathBuf,
 }
 
@@ -29,6 +30,7 @@ impl AgentAdapter {
         let options = SessionOptions {
             provider: request.provider,
             model: request.model,
+            api_key: request.api_key,
             enabled_tools: Some(request.tools),
             working_directory: Some(request.working_directory),
             ..SessionOptions::default()

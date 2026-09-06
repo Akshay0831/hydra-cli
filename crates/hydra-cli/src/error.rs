@@ -15,8 +15,14 @@ pub enum HydraCliError {
     Configuration(anyhow::Error),
     #[error("IO error: {0}")]
     Io(std::io::Error),
-    #[error("Provider error: {0}")]
-    Provider(String),
+    #[error("No eligible provider candidate for {request}")]
+    NoEligibleCandidate { request: String },
+    #[error("Provider attempt failed for {candidate} (attempt {attempt}): {error}")]
+    ProviderAttempt {
+        candidate: String,
+        attempt: u32,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -74,9 +80,9 @@ impl ErrorHandler {
                     .iter()
                     .any(|marker| message.contains(marker))
             }
-            HydraCliError::Provider(error) => {
+            HydraCliError::ProviderAttempt { error, .. } => {
                 let message = error.to_ascii_lowercase();
-                ["timeout", "temporary", "network", "rate limit"]
+                ["timeout", "temporary", "network", "rate limit", "429"]
                     .iter()
                     .any(|marker| message.contains(marker))
             }

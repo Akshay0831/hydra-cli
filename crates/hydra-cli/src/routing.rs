@@ -260,6 +260,7 @@ impl fmt::Display for Capability {
 pub struct RoutingRequest {
     pub purpose: Option<String>,
     pub required_tools: Vec<String>,
+    pub required_capabilities: Vec<String>,
     pub provider: Option<String>,
     pub model: Option<String>,
     pub profile: Option<String>,
@@ -281,6 +282,12 @@ pub fn resolve(candidates: &[Candidate], request: &RoutingRequest) -> Vec<Candid
                 .required_tools
                 .iter()
                 .all(|tool| candidate.capabilities.iter().any(|cap| cap == tool))
+        })
+        .filter(|candidate| {
+            request
+                .required_capabilities
+                .iter()
+                .all(|capability| candidate.capabilities.iter().any(|cap| cap == capability))
         })
         .filter(|candidate| {
             // Check explicit provider filter

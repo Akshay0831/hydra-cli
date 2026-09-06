@@ -62,10 +62,12 @@ hydra-cli providers --config hydra.json
 hydra-cli prompt --model coding "Explain this repository"
 ```
 
-Use `hydra-cli <command> --help` for options. `prompt` requires a supported Pi
-provider and credential; `js`, `index`, `execute`, and routing inspection do not
-require an API key. Provider selection and retry state are implemented; routing
-provider execution end to end is still being integrated into `prompt`.
+Use `hydra-cli <command> --help` for options. `prompt` requires a configured
+candidate and credential; it routes by purpose, tools, capabilities, provider,
+model, and profile, then retries transient failures and fails over in preference
+order. `js`, `index`, `execute`, and routing inspection do not require an API
+key. Credentials are resolved by Hydra and passed only to Pi session creation;
+they are never printed.
 
 ## Build From Source
 
@@ -108,10 +110,9 @@ Hydra source is MIT licensed. The Pi submodule retains its own terms in
 
 - Multi-agent DAG workflows with dependency-aware parallel execution.
 - Persistent indexes with richer symbol, dependency, and semantic search.
-- End-to-end provider pools for `prompt`, with health scoring, retries, backoff,
-  and automatic failover instead of direct provider/model selection.
 - Custom Hydra tools, extension loading, approvals, and sandbox policies.
-- Stronger JavaScript limits for time, memory, modules, and TypeScript support.
+- Persistent retry history and richer provider health scoring across CLI runs.
+- Stronger JavaScript limits for modules and TypeScript support.
 - Session-aware prompts, resumable workflows, and structured run history.
 - Optional TUI workflows and packaged binaries/installers.
 - Published Hydra crates and pinned registry or Git dependency releases.

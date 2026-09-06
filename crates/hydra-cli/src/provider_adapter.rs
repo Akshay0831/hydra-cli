@@ -3,7 +3,6 @@ use crate::routing::{Candidate, ResolvedCredential, RoutingConfig, RoutingReques
 use anyhow::Result;
 use std::collections::HashMap;
 
-// Simplified provider adapter without complex upstream dependencies
 #[derive(Debug, Clone)]
 pub struct HydraProviderAdapter {
     candidate: Candidate,
@@ -24,6 +23,18 @@ impl HydraProviderAdapter {
 
     pub fn resolved_credential(&self) -> &ResolvedCredential {
         &self.resolved_credential
+    }
+
+    pub fn provider(&self) -> &str {
+        &self.candidate.provider
+    }
+
+    pub fn model(&self) -> &str {
+        &self.candidate.model
+    }
+
+    pub fn api_key(&self) -> &str {
+        &self.resolved_credential.value
     }
 }
 
