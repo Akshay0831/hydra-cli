@@ -1,6 +1,4 @@
 //! Provider adapter that bridges Hydra routing decisions with upstream provider execution.
-#![allow(dead_code)]
-
 use crate::routing::{Candidate, ResolvedCredential, RoutingConfig, RoutingRequest};
 use anyhow::Result;
 use std::collections::HashMap;

@@ -1,19 +1,19 @@
 //! Command handlers for Hydra CLI.
 
-use crate::error::{ErrorContext, HydraCliError};
+use crate::agent_adapter::{AgentAdapter, PromptRequest};
+use crate::error::{ErrorContext, ErrorHandler, HydraCliError};
 use crate::progress::CliFeedback;
 use crate::progress::ProgressManager;
 use crate::provider_adapter::ProviderAdapterFactory;
-use crate::retry_manager::RetryManager;
-use crate::routing::{Candidate, RoutingConfig, RoutingRequest};
+use crate::retry_manager::{RetryContext, RetryManager};
+use crate::routing::{Candidate, Capability, RoutingConfig, RoutingRequest};
 use crate::utils::{parse_execution_strategy, parse_languages};
 use anyhow::Result;
 use clap::Subcommand;
 use hydra_dag::{Task, TaskGraph};
 use hydra_matrix::{CodeMatrix, IndexConfig};
 use hydra_sandbox::Sandbox;
-use pi::model::AssistantMessageEvent;
-use pi::sdk::{AgentEvent, SessionOptions, BUILTIN_TOOL_NAMES};
+use std::collections::HashSet;
 use std::path::Path;
 
 fn parse_candidate(value: &str) -> Result<Candidate, String> {
@@ -72,17 +72,25 @@ impl Task for SimpleTask {
 
 impl SimpleTask {
     async fn execute_with_error_handling(&self) -> Result<String> {
-        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-
-        if rand::random::<f64>() < 0.1 {
-            return Err(anyhow::anyhow!("Simulated task failure"));
-        }
-
-        Ok(format!(
-            "Completed: {} (took {}ms)",
-            self.description,
-            self.context.elapsed_ms()
-        ))
+        let handler = ErrorHandler::new(2, Default::default());
+        let context = self.context.clone().with_retry_count(0);
+        handler
+            .execute_with_retry("simple task", || {
+                if rand::random::<f64>() < 0.1 {
+                    return Err(HydraCliError::TaskExecution(anyhow::anyhow!(
+                        "temporary task failure"
+                    )));
+                }
+                Ok(format!(
+                    "Completed: {} (took {}ms, operation={}, retries={})",
+                    self.description,
+                    context.elapsed_ms(),
+                    context.operation(),
+                    context.retry_count()
+                ))
+            })
+            .await
+            .map_err(anyhow::Error::msg)
     }
 }
 
@@ -135,6 +143,12 @@ pub enum CommandHandler {
         purpose: Option<String>,
         #[arg(long = "tool")]
         tools: Vec<String>,
+        #[arg(long = "capability")]
+        capabilities: Vec<String>,
+        #[arg(long = "required-capability")]
+        required_capabilities: Vec<String>,
+        #[arg(long, default_value_t = 0)]
+        preference: u32,
         #[arg(long)]
         provider: Option<String>,
         #[arg(long)]
@@ -205,6 +219,9 @@ impl CommandHandler {
                 config,
                 purpose,
                 tools,
+                capabilities,
+                required_capabilities,
+                preference,
                 provider,
                 model,
                 profile,
@@ -214,6 +231,9 @@ impl CommandHandler {
                     config,
                     purpose.clone(),
                     tools.clone(),
+                    capabilities.clone(),
+                    required_capabilities.clone(),
+                    *preference,
                     provider.clone(),
                     model.clone(),
                     profile.clone(),
@@ -331,7 +351,14 @@ impl CommandHandler {
         feedback: &mut CliFeedback,
     ) -> Result<(), HydraCliError> {
         let configured = RoutingConfig::load(config)?;
-        let factory = ProviderAdapterFactory::new(configured);
+        let mut factory = ProviderAdapterFactory::new(configured.clone());
+        for provider in configured
+            .profiles()
+            .into_iter()
+            .flat_map(|profile| profile.providers)
+        {
+            factory.register_provider(provider.clone(), provider);
+        }
 
         feedback.info_message("Registered upstream providers:".to_string());
         for provider_name in factory.registered_providers() {
@@ -349,6 +376,49 @@ impl CommandHandler {
                 factory.registered_providers().len()
             ));
         }
+        let candidates = configured.resolve_with_candidates(&[], &RoutingRequest::default());
+        let mut retry_manager = RetryManager::new(configured.clone());
+        for candidate in &candidates {
+            retry_manager.get_or_create_state(candidate);
+        }
+        let adapters = factory
+            .create_adapters_for_request(&RoutingRequest::default(), &[])
+            .await?;
+        let ready = adapters
+            .iter()
+            .map(|adapter| {
+                format!(
+                    "{}/{}/{}",
+                    adapter.candidate().provider,
+                    adapter.candidate().model,
+                    adapter.candidate().profile
+                )
+            })
+            .collect::<HashSet<_>>();
+        for adapter in adapters {
+            let candidate = adapter.candidate();
+            let retry_context = RetryContext::new(&mut retry_manager, candidate.clone(), 0);
+            let backoff = retry_context.backoff_duration();
+            retry_context.mark_success();
+            println!(
+                "  ready: {}/{}/{} ({:?}, backoff={}ms)",
+                candidate.provider,
+                candidate.model,
+                candidate.profile,
+                adapter.resolved_credential().source,
+                backoff.as_millis()
+            );
+        }
+        for candidate in candidates {
+            let key = format!(
+                "{}/{}/{}",
+                candidate.provider, candidate.model, candidate.profile
+            );
+            if !ready.contains(&key) {
+                RetryContext::new(&mut retry_manager, candidate, 0)
+                    .mark_failure("provider adapter unavailable".to_string());
+            }
+        }
         Ok(())
     }
 
@@ -358,7 +428,10 @@ impl CommandHandler {
         feedback: &mut CliFeedback,
     ) -> Result<(), HydraCliError> {
         let configured = RoutingConfig::load(config)?;
-        let manager = RetryManager::new(configured);
+        let mut manager = RetryManager::with_config(configured.clone(), Default::default());
+        for candidate in configured.resolve_with_candidates(&[], &RoutingRequest::default()) {
+            manager.get_or_create_state(&candidate);
+        }
 
         feedback.info_message("Provider retry/failover status:".to_string());
         for status in manager.get_provider_status() {
@@ -381,6 +454,8 @@ impl CommandHandler {
         if manager.get_provider_status().is_empty() {
             println!("No provider retry state available.");
         }
+        let healthy = manager.get_healthy_candidates(&RoutingRequest::default(), &[]);
+        println!("Healthy candidates: {}", healthy.len());
         Ok(())
     }
 
@@ -395,7 +470,14 @@ impl CommandHandler {
         let configured = RoutingConfig::load(config)?;
         let mut manager = RetryManager::new(configured);
 
-        manager.reset_provider(provider, model, profile);
+        if provider == "*" {
+            manager.reset_all();
+        } else {
+            let candidate =
+                Candidate::new(provider.to_string(), model.to_string(), profile.to_string());
+            manager.get_or_create_state(&candidate);
+            manager.reset_provider(provider, model, profile);
+        }
         println!("Reset retry state for {}/{}/{}", provider, model, profile);
         Ok(())
     }
@@ -406,6 +488,9 @@ impl CommandHandler {
         config: &Path,
         purpose: Option<String>,
         tools: Vec<String>,
+        capabilities: Vec<String>,
+        required_capabilities: Vec<String>,
+        preference: u32,
         provider: Option<String>,
         model: Option<String>,
         profile: Option<String>,
@@ -413,6 +498,20 @@ impl CommandHandler {
         _feedback: &mut CliFeedback,
     ) -> Result<(), HydraCliError> {
         let configured = RoutingConfig::load(config)?;
+        let mut candidates = candidates;
+        for candidate in &mut candidates {
+            *candidate = candidate.clone().with_preference(preference);
+            for capability in &capabilities {
+                *candidate = candidate
+                    .clone()
+                    .with_capability(Capability::from_str(capability)?);
+            }
+            for capability in &required_capabilities {
+                *candidate = candidate
+                    .clone()
+                    .with_required_capability(Capability::from_str(capability)?);
+            }
+        }
         let request = RoutingRequest {
             purpose,
             required_tools: tools,
@@ -437,18 +536,33 @@ impl CommandHandler {
         strategy: String,
         feedback: &mut CliFeedback,
     ) -> Result<(), HydraCliError> {
+        feedback.start_spinner("Preparing task execution".to_string());
+        feedback.update_spinner("Building task graph".to_string());
         feedback.info_message(format!(
             "Starting task execution with config: {}",
             config.display()
         ));
 
-        let _configured = RoutingConfig::load(config).map_err(|e| {
-            HydraCliError::Configuration(anyhow::anyhow!("Failed to load config: {}", e))
-        })?;
-        let strategy = parse_execution_strategy(&strategy)?;
+        let _configured = match RoutingConfig::load(config) {
+            Ok(configured) => configured,
+            Err(error) => {
+                feedback.stop_spinner();
+                return Err(HydraCliError::Configuration(anyhow::anyhow!(
+                    "Failed to load config: {error}"
+                )));
+            }
+        };
+        let strategy = match parse_execution_strategy(&strategy) {
+            Ok(strategy) => strategy,
+            Err(error) => {
+                feedback.stop_spinner();
+                return Err(error.into());
+            }
+        };
 
         let mut progress_manager = ProgressManager::new();
         let progress_bar = progress_manager.create_progress_bar("Task Execution".to_string(), 1);
+        progress_bar.increment();
         let mut task_progress = progress_manager.create_task_execution_progress(1);
         task_progress.add_progress_bar(progress_bar.clone());
 
@@ -473,6 +587,7 @@ impl CommandHandler {
                 .unwrap_or_else(|| "Unknown task failure".to_string());
 
             task_progress.task_failed("task", &error_msg);
+            feedback.stop_spinner();
             return Err(HydraCliError::TaskExecution(anyhow::anyhow!(
                 "{}", error_msg
             )));
@@ -480,7 +595,8 @@ impl CommandHandler {
 
         task_progress.task_completed("task");
 
-        progress_bar.complete();
+        progress_manager.complete_all();
+        feedback.stop_spinner();
         feedback.success_message(format!(
             "Task execution completed with strategy: {:?}",
             results.strategy
@@ -497,7 +613,7 @@ impl CommandHandler {
             println!("Execution Statistics:");
             for (i, stat) in stats.iter().enumerate() {
                 println!("  Set {}: {}/{} completed, {} failed, {:.1}% success rate, {:.2}s elapsed, {:.2}s avg duration", 
-                    i + 1, stat.completed, stat.total, stat.failed, 
+                    i + 1, stat.completed, stat.total, stat.failed,
                     stat.success_rate(), stat.elapsed.as_secs_f64(), stat.average_duration().as_secs_f64());
             }
         }
@@ -512,6 +628,8 @@ impl CommandHandler {
         languages: Vec<String>,
         feedback: &mut CliFeedback,
     ) -> Result<(), HydraCliError> {
+        feedback.start_spinner(format!("Indexing {}", root.display()));
+        feedback.update_spinner("Scanning files".to_string());
         let languages = parse_languages(&languages);
         if languages.is_empty() {
             feedback.info_message(
@@ -530,24 +648,28 @@ impl CommandHandler {
                 .collect();
         }
 
-        let mut matrix = CodeMatrix::with_config(index_config).map_err(|e| {
-            HydraCliError::Indexing(anyhow::anyhow!("Failed to create code matrix: {}", e))
-        })?;
+        let mut matrix = match CodeMatrix::with_config(index_config) {
+            Ok(matrix) => matrix,
+            Err(error) => {
+                feedback.stop_spinner();
+                return Err(HydraCliError::Indexing(anyhow::anyhow!(
+                    "Failed to create code matrix: {error}"
+                )));
+            }
+        };
 
-        let context = ErrorContext::new("indexing").with_details(format!(
-            "Root: {}, Languages: {:?}",
-            root.display(),
-            languages
-        ));
+        let context = ErrorContext::new("indexing");
 
         let mut progress_manager = ProgressManager::new();
         let progress_bar = progress_manager.create_progress_bar("Indexing".to_string(), 100);
+        progress_bar.increment();
 
         feedback.info_message(format!("Indexing codebase at: {}", root.display()));
         progress_bar.set_message("Starting indexing...".to_string());
 
         if !root.exists() {
-            progress_bar.complete();
+            progress_manager.complete_all();
+            feedback.stop_spinner();
             return Err(HydraCliError::Indexing(anyhow::anyhow!(
                 "Index directory {} not found",
                 root.display()
@@ -564,7 +686,8 @@ impl CommandHandler {
         progress_bar.set_current(indexed_files);
         progress_bar.set_message(format!("Indexed {} files", indexed_files));
 
-        progress_bar.complete();
+        progress_manager.complete_all();
+        feedback.stop_spinner();
         let stats = matrix.get_stats().await;
         feedback.success_message(format!(
             "Found {} indexed elements from {} files",
@@ -589,10 +712,18 @@ impl CommandHandler {
         Ok(())
     }
 
-    async fn js(&self, code: &str, _feedback: &mut CliFeedback) -> Result<(), HydraCliError> {
-        let mut sandbox = Sandbox::new().map_err(|e| {
-            HydraCliError::JavaScript(anyhow::anyhow!("Failed to create sandbox: {}", e))
-        })?;
+    async fn js(&self, code: &str, feedback: &mut CliFeedback) -> Result<(), HydraCliError> {
+        feedback.start_spinner("Executing JavaScript".to_string());
+        feedback.update_spinner("Starting sandbox".to_string());
+        let mut sandbox = match Sandbox::new() {
+            Ok(sandbox) => sandbox,
+            Err(error) => {
+                feedback.stop_spinner();
+                return Err(HydraCliError::JavaScript(anyhow::anyhow!(
+                    "Failed to create sandbox: {error}"
+                )));
+            }
+        };
 
         let context = ErrorContext::new("javascript_execution");
         println!("Executing JavaScript code in sandbox...");
@@ -602,16 +733,19 @@ impl CommandHandler {
 
         match result {
             Ok(Ok(sandbox_result)) => {
+                feedback.stop_spinner();
                 println!("Execution result: {:?}", sandbox_result);
                 println!("Execution completed in {}ms", context.elapsed_ms());
             }
             Ok(Err(e)) => {
+                feedback.stop_spinner();
                 return Err(HydraCliError::JavaScript(anyhow::anyhow!(
                     "JavaScript execution failed: {}",
                     e
                 )));
             }
             Err(_) => {
+                feedback.stop_spinner();
                 return Err(HydraCliError::JavaScript(anyhow::anyhow!(
                     "JavaScript execution timeout after 30s"
                 )));
@@ -629,41 +763,32 @@ impl CommandHandler {
         _feedback: &mut CliFeedback,
     ) -> Result<(), HydraCliError> {
         let enabled_tools = tools.clone().unwrap_or_else(|| {
-            BUILTIN_TOOL_NAMES
+            AgentAdapter::builtin_tool_names()
                 .iter()
                 .map(|name| (*name).to_string())
                 .collect()
         });
-        let options = SessionOptions {
-            provider: provider.clone(),
-            model: model.clone(),
-            enabled_tools: Some(enabled_tools),
-            working_directory: Some(std::env::current_dir().map_err(HydraCliError::Io)?),
-            ..SessionOptions::default()
-        };
-        let mut session = pi::sdk::create_agent_session(options)
-            .await
-            .map_err(|error| HydraCliError::Provider(error.to_string()))?;
-        let response = session
-            .prompt(message, |event| {
-                if let AgentEvent::MessageUpdate {
-                    assistant_message_event: AssistantMessageEvent::TextDelta { delta, .. },
-                    ..
-                } = event
-                {
-                    print!("{delta}");
-                    let _ = std::io::Write::flush(&mut std::io::stdout());
-                }
-            })
-            .await
-            .map_err(|error| HydraCliError::Provider(error.to_string()))?;
+        AgentAdapter::prompt(
+            PromptRequest {
+                message: message.to_string(),
+                tools: enabled_tools,
+                provider: provider.clone(),
+                model: model.clone(),
+                working_directory: std::env::current_dir().map_err(HydraCliError::Io)?,
+            },
+            |delta| {
+                print!("{delta}");
+                let _ = std::io::Write::flush(&mut std::io::stdout());
+            },
+        )
+        .await
+        .map_err(|error| HydraCliError::Provider(error.to_string()))?;
         println!();
-        let _ = response;
         Ok(())
     }
 
     async fn tools(&self, _feedback: &mut CliFeedback) -> Result<(), HydraCliError> {
-        for name in BUILTIN_TOOL_NAMES {
+        for name in AgentAdapter::builtin_tool_names() {
             println!("{name}");
         }
         Ok(())

@@ -1,7 +1,7 @@
 ﻿[workspace]
 resolver = "2"
+exclude = ["core/pi_agent"]
 members = [
-    "core/pi_agent",
     "crates/hydra-matrix",
     "crates/hydra-sandbox",
     "crates/hydra-dag",

@@ -1,3 +1,4 @@
+mod agent_adapter;
 mod commands;
 mod error;
 mod progress;

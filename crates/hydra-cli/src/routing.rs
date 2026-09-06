@@ -1,5 +1,3 @@
-#![allow(dead_code)]
-
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -88,8 +86,7 @@ pub struct RoutingConfig {
 }
 
 /// Strategy for handling fallback when primary candidates fail
-#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
-#[derive(Default)]
+#[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize, Default)]
 pub enum FallbackMode {
     /// Only use explicitly specified candidates
     Strict,
@@ -101,7 +98,6 @@ pub enum FallbackMode {
     /// Don't attempt fallback, just report the error
     None,
 }
-
 
 impl RoutingConfig {
     pub fn init(path: &Path, force: bool) -> Result<()> {
@@ -472,10 +468,12 @@ mod tests {
 
     #[test]
     fn resolves_literal_credential_without_exposing_it_in_metadata() {
-        let config: RoutingConfig = serde_json::from_str(r#"{
+        let config: RoutingConfig = serde_json::from_str(
+            r#"{
                 "profiles": {"coding": {"credentials": {"openai": "literal:test-secret"}}},
                 "candidates": [{"provider":"openai","model":"coding","profile":"coding"}]
-            }"#)
+            }"#,
+        )
         .expect("parse config");
         let candidate = &config.candidates[0];
 

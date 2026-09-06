@@ -1,6 +1,4 @@
 //! Spinner utilities for CLI operations.
-#![allow(dead_code)]
-
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::time::interval;
@@ -28,7 +26,7 @@ impl EnhancedSpinner {
         self.status_messages.push(status);
     }
 
-    pub async fn start(&self) {
+    pub fn start(&self) {
         let running = self.running.clone();
         let current_index = self.current_index.clone();
         let status_messages = self.status_messages.clone();

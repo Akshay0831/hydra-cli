@@ -2,12 +2,16 @@
 name = "hydra-cli"
 version = "0.1.0"
 edition = "2021"
+description = "Hydra CLI for agent workflows, routing, indexing, sandboxing, and task execution"
+license = "MIT"
+readme = "../../README.md"
+repository = "https://github.com/Akshay0831/hydra-cli"
 
 [dependencies]
-pi = { package = "pi_agent_rust", path = "../../core/pi_agent" }
-hydra-matrix = { path = "../hydra-matrix" }
-hydra-sandbox = { path = "../hydra-sandbox" }
-hydra-dag = { path = "../hydra-dag" }
+pi = { package = "pi_agent_rust", version = "0.2.0", path = "../../core/pi_agent" }
+hydra-matrix = { version = "0.1.0", path = "../hydra-matrix" }
+hydra-sandbox = { version = "0.1.0", path = "../hydra-sandbox" }
+hydra-dag = { version = "0.1.0", path = "../hydra-dag" }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }

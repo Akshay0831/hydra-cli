@@ -1,5 +1,4 @@
 //! Retry/failover state management for provider adapters.
-#![allow(dead_code)]
 //!
 //! This module implements bounded retry logic with exponential backoff for
 //! transient failures, maintaining failover state between provider calls.
@@ -347,7 +346,7 @@ impl<'a> RetryContext<'a> {
 
     /// Get the current backoff duration.
     pub fn backoff_duration(&self) -> Duration {
-        self.backoff
+        self.backoff.saturating_mul(self.attempt.max(1))
     }
 }
 
