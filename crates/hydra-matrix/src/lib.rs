@@ -102,7 +102,7 @@ impl Default for IndexConfig {
 /// The main code indexing engine
 pub struct CodeMatrix {
     index: RwLock<HashMap<String, CodeElement>>,
-    config: IndexConfig,
+    pub config: IndexConfig,
     language_parsers: HashMap<String, Box<dyn LanguageParser>>,
 }
 
@@ -131,10 +131,10 @@ mod parsers {
         fn parse_file(&self, file_path: &Path, content: &str) -> Result<Vec<CodeElement>> {
             let mut elements = Vec::new();
             
-            // Simple text-based parsing for demo
             for (line_num, line) in content.lines().enumerate() {
-                if line.trim().starts_with("fn ") {
-                    let name = line.trim().strip_prefix("fn ").unwrap().split('(').next().unwrap().trim();
+                let declaration = line.trim().strip_prefix("pub ").unwrap_or(line.trim());
+                if declaration.starts_with("fn ") {
+                    let name = declaration.strip_prefix("fn ").unwrap().split('(').next().unwrap().trim();
                     elements.push(CodeElement {
                         id: format!("{}:{}:{}", file_path.display(), line_num, name),
                         file_path: file_path.to_path_buf(),
@@ -145,8 +145,8 @@ mod parsers {
                         dependencies: Vec::new(),
                         metadata: HashMap::new(),
                     });
-                } else if line.trim().starts_with("struct ") {
-                    let name = line.trim().strip_prefix("struct ").unwrap().split('{').next().unwrap().trim();
+                } else if declaration.starts_with("struct ") {
+                    let name = declaration.strip_prefix("struct ").unwrap().split('{').next().unwrap().trim();
                     elements.push(CodeElement {
                         id: format!("{}:{}:{}", file_path.display(), line_num, name),
                         file_path: file_path.to_path_buf(),
@@ -157,8 +157,8 @@ mod parsers {
                         dependencies: Vec::new(),
                         metadata: HashMap::new(),
                     });
-                } else if line.trim().starts_with("enum ") {
-                    let name = line.trim().strip_prefix("enum ").unwrap().split('{').next().unwrap().trim();
+                } else if declaration.starts_with("enum ") {
+                    let name = declaration.strip_prefix("enum ").unwrap().split('{').next().unwrap().trim();
                     elements.push(CodeElement {
                         id: format!("{}:{}:{}", file_path.display(), line_num, name),
                         file_path: file_path.to_path_buf(),
@@ -202,7 +202,13 @@ mod parsers {
             
             // Simple text-based parsing for demo
             for (line_num, line) in content.lines().enumerate() {
-                if line.trim().starts_with("function ") || line.trim().starts_with("const ") || line.trim().starts_with("let ") {
+                let declaration = line.trim().strip_prefix("export ").unwrap_or(line.trim());
+                if declaration.starts_with("function ")
+                    || declaration.starts_with("const ")
+                    || declaration.starts_with("let ")
+                    || declaration.starts_with("class ")
+                    || declaration.starts_with("interface ")
+                {
                     let name = line
                         .split_whitespace()
                         .nth(1)
@@ -214,10 +220,12 @@ mod parsers {
                         .trim();
                     
                     if !name.is_empty() {
-                        let element_type = if line.trim().starts_with("function ") {
+                        let element_type = if declaration.starts_with("function ") {
                             ElementType::Function
-                        } else if line.trim().contains("class ") {
+                        } else if declaration.starts_with("class ") {
                             ElementType::Class
+                        } else if declaration.starts_with("interface ") {
+                            ElementType::Interface
                         } else {
                             ElementType::Variable
                         };
@@ -459,17 +467,32 @@ impl CodeMatrix {
     fn collect_matching_files(&self, pattern: &str) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
         let pattern_obj = Pattern::new(pattern)?;
+        let exact_root = Path::new(pattern);
+        let matches_all_files = exact_root.is_dir();
+        let root = pattern
+            .find(['*', '?'])
+            .map(|index| &pattern[..index])
+            .unwrap_or(pattern)
+            .trim_end_matches(['/', '\\']);
+        let root = if root.is_empty() { "." } else { root };
         
-        for entry in WalkDir::new("./").into_iter().filter_entry(|e| {
+        for entry in WalkDir::new(root)
+            .follow_links(self.config.follow_symlinks)
+            .into_iter()
+            .filter_entry(|e| {
             if e.path().is_dir() && e.path().components().count() > 2 {
-                return !e.path().components().any(|c| c.as_os_str() == "node_modules");
+                return !e.path().components().any(|c| {
+                    matches!(c.as_os_str().to_str(), Some("node_modules" | "target" | ".git"))
+                });
             }
             true
         }) {
             let entry = entry?;
             let path = entry.path();
             
-            if path.is_file() && pattern_obj.matches(path.to_str().unwrap_or("")) {
+            if path.is_file()
+                && (matches_all_files || pattern_obj.matches(path.to_str().unwrap_or("")))
+            {
                     files.push(path.to_path_buf());
                 }
         }
@@ -482,9 +505,10 @@ impl CodeMatrix {
         let file_str = file_path.to_string_lossy().to_string();
         
         // Check include patterns
+        let file_name = file_path.file_name().and_then(|name| name.to_str()).unwrap_or("");
         let should_include = self.config.include_patterns.is_empty() ||
             self.config.include_patterns.iter().any(|pattern| {
-                Pattern::new(pattern).is_ok_and(|p| p.matches(&file_str))
+                Pattern::new(pattern).is_ok_and(|p| p.matches(file_name) || p.matches(&file_str))
             });
         
         // Check exclude patterns
@@ -496,7 +520,7 @@ impl CodeMatrix {
     }
     
     /// Check if an element matches the search query
-    fn element_matches_query(&self, element: &CodeElement, query: &str) -> bool {
+    pub fn element_matches_query(&self, element: &CodeElement, query: &str) -> bool {
         let query_lower = query.to_lowercase();
         element.name.to_lowercase().contains(&query_lower) ||
         element.content.to_lowercase().contains(&query_lower) ||

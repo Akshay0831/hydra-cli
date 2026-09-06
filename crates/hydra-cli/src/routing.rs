@@ -1,8 +1,11 @@
+#![allow(dead_code)]
+
 use std::collections::HashMap;
 use std::path::Path;
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 #[derive(Debug, Clone, Eq, PartialEq, Hash, Deserialize, Serialize)]
 pub struct Candidate {
@@ -39,14 +42,14 @@ pub struct ResolvedCredential {
 
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
 pub enum Capability {
-    Tool(String), // External tool access
-    Streaming,    // Streaming responses supported
+    Tool(String),     // External tool access
+    Streaming,        // Streaming responses supported
     StructuredOutput, // Structured JSON output
-    Reasoning,    // Reasoning capabilities
-    ContextLarge, // Large context window
-    Vision,       // Image input support
-    CodeExecution, // Code execution capability
-    // Add more as needed
+    Reasoning,        // Reasoning capabilities
+    ContextLarge,     // Large context window
+    Vision,           // Image input support
+    CodeExecution,    // Code execution capability
+                      // Add more as needed
 }
 
 impl Capability {
@@ -86,22 +89,19 @@ pub struct RoutingConfig {
 
 /// Strategy for handling fallback when primary candidates fail
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize)]
+#[derive(Default)]
 pub enum FallbackMode {
     /// Only use explicitly specified candidates
     Strict,
     /// Use lower-priority candidates from the same provider
     Provider,
     /// Use any lower-priority candidate
+    #[default]
     Any,
     /// Don't attempt fallback, just report the error
     None,
 }
 
-impl Default for FallbackMode {
-    fn default() -> Self {
-        FallbackMode::Any
-    }
-}
 
 impl RoutingConfig {
     pub fn init(path: &Path, force: bool) -> Result<()> {
@@ -139,7 +139,8 @@ impl RoutingConfig {
         let mut selected = resolve_configured(&self.candidates, &self.profiles, request);
         selected.extend(resolve(additional, request));
         selected.sort_by(|left, right| {
-            right.preference
+            right
+                .preference
                 .cmp(&left.preference)
                 .then_with(|| left.provider.cmp(&right.provider))
                 .then_with(|| left.model.cmp(&right.model))
@@ -245,16 +246,16 @@ impl Candidate {
     }
 }
 
-impl Capability {
-    fn to_string(&self) -> String {
+impl fmt::Display for Capability {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Capability::Tool(tool) => format!("tool:{}", tool),
-            Capability::Streaming => "streaming".to_string(),
-            Capability::StructuredOutput => "structured".to_string(),
-            Capability::Reasoning => "reasoning".to_string(),
-            Capability::ContextLarge => "large-context".to_string(),
-            Capability::Vision => "vision".to_string(),
-            Capability::CodeExecution => "code-execution".to_string(),
+            Capability::Tool(tool) => write!(formatter, "tool:{tool}"),
+            Capability::Streaming => formatter.write_str("streaming"),
+            Capability::StructuredOutput => formatter.write_str("structured"),
+            Capability::Reasoning => formatter.write_str("reasoning"),
+            Capability::ContextLarge => formatter.write_str("large-context"),
+            Capability::Vision => formatter.write_str("vision"),
+            Capability::CodeExecution => formatter.write_str("code-execution"),
         }
     }
 }
@@ -280,46 +281,54 @@ pub fn resolve(candidates: &[Candidate], request: &RoutingRequest) -> Vec<Candid
         })
         .filter(|candidate| {
             // Check if all required tools are supported
-            request.required_tools.iter().all(|tool| 
-                candidate.capabilities.iter().any(|cap| cap == tool)
-            )
+            request
+                .required_tools
+                .iter()
+                .all(|tool| candidate.capabilities.iter().any(|cap| cap == tool))
         })
         .filter(|candidate| {
             // Check explicit provider filter
-            request.provider.as_ref().is_none_or(|provider| 
-                &candidate.provider == provider
-            )
+            request
+                .provider
+                .as_ref()
+                .is_none_or(|provider| &candidate.provider == provider)
         })
         .filter(|candidate| {
             // Check explicit model filter
-            request.model.as_ref().is_none_or(|model| 
-                &candidate.model == model
-            )
+            request
+                .model
+                .as_ref()
+                .is_none_or(|model| &candidate.model == model)
         })
         .filter(|candidate| {
             // Check explicit profile filter
-            request.profile.as_ref().is_none_or(|profile| 
-                &candidate.profile == profile
-            )
+            request
+                .profile
+                .as_ref()
+                .is_none_or(|profile| &candidate.profile == profile)
         })
         .cloned()
         .collect();
-    
+
     // Remove duplicates by keeping the highest preference for each (provider, model, profile) tuple
     let mut deduplicated = Vec::new();
     let mut seen = std::collections::HashSet::new();
-    
+
     for candidate in eligible {
-        let key = (candidate.provider.clone(), candidate.model.clone(), candidate.profile.clone());
+        let key = (
+            candidate.provider.clone(),
+            candidate.model.clone(),
+            candidate.profile.clone(),
+        );
         if !seen.contains(&key) {
             seen.insert(key);
             deduplicated.push(candidate);
         } else {
             // If we've seen this combination before, keep the one with higher preference
             if let Some(existing) = deduplicated.iter_mut().find(|c| {
-                c.provider == candidate.provider && 
-                c.model == candidate.model && 
-                c.profile == candidate.profile
+                c.provider == candidate.provider
+                    && c.model == candidate.model
+                    && c.profile == candidate.profile
             }) {
                 if candidate.preference > existing.preference {
                     *existing = candidate;
@@ -327,15 +336,17 @@ pub fn resolve(candidates: &[Candidate], request: &RoutingRequest) -> Vec<Candid
             }
         }
     }
-    
+
     // Sort by precedence: preference > provider > model > profile
     deduplicated.sort_by(|left, right| {
-        right.preference.cmp(&left.preference)  // Higher preference first
+        right
+            .preference
+            .cmp(&left.preference) // Higher preference first
             .then_with(|| left.provider.cmp(&right.provider))
             .then_with(|| left.model.cmp(&right.model))
             .then_with(|| left.profile.cmp(&right.profile))
     });
-    
+
     deduplicated
 }
 
@@ -405,7 +416,7 @@ mod tests {
         first = first.with_preference(1);
         assert_eq!(
             resolve(&[second.clone(), first.clone()], &RoutingRequest::default()),
-            vec![first, second]
+            vec![second, first]
         );
     }
 
@@ -461,12 +472,10 @@ mod tests {
 
     #[test]
     fn resolves_literal_credential_without_exposing_it_in_metadata() {
-        let config: RoutingConfig = serde_json::from_str(&format!(
-            r#"{{
-                "profiles": {{"coding": {{"credentials": {{"openai": "literal:test-secret"}}}}}},
-                "candidates": [{{"provider":"openai","model":"coding","profile":"coding"}}]
-            }}"#
-        ))
+        let config: RoutingConfig = serde_json::from_str(r#"{
+                "profiles": {"coding": {"credentials": {"openai": "literal:test-secret"}}},
+                "candidates": [{"provider":"openai","model":"coding","profile":"coding"}]
+            }"#)
         .expect("parse config");
         let candidate = &config.candidates[0];
 

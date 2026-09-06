@@ -1,4 +1,5 @@
 //! Provider adapter that bridges Hydra routing decisions with upstream provider execution.
+#![allow(dead_code)]
 
 use crate::routing::{Candidate, ResolvedCredential, RoutingConfig, RoutingRequest};
 use anyhow::Result;
@@ -53,13 +54,10 @@ impl ProviderAdapterFactory {
     ) -> Result<Option<HydraProviderAdapter>> {
         // Resolve the credential for this candidate
         let resolved_credential = self.routing_config.resolve_credential(candidate)?;
-        
+
         // Find the matching upstream provider
         if self.upstream_providers.contains_key(&candidate.provider) {
-            let adapter = HydraProviderAdapter::new(
-                candidate.clone(),
-                resolved_credential,
-            );
+            let adapter = HydraProviderAdapter::new(candidate.clone(), resolved_credential);
             Ok(Some(adapter))
         } else {
             Ok(None)
@@ -71,7 +69,9 @@ impl ProviderAdapterFactory {
         request: &RoutingRequest,
         additional_candidates: &[Candidate],
     ) -> Result<Vec<HydraProviderAdapter>> {
-        let candidates = self.routing_config.resolve_with_candidates(additional_candidates, request);
+        let candidates = self
+            .routing_config
+            .resolve_with_candidates(additional_candidates, request);
         let mut adapters = Vec::new();
 
         for candidate in candidates {
@@ -103,24 +103,30 @@ mod tests {
     fn provider_adapter_factory_registers_providers() {
         let routing_config = RoutingConfig::default();
         let mut factory = ProviderAdapterFactory::new(routing_config);
-        
+
         factory.register_provider("openai".to_string(), "openai-api".to_string());
         factory.register_provider("anthropic".to_string(), "anthropic-api".to_string());
-        
+
         let mut providers = factory.registered_providers();
         providers.sort();
-        assert_eq!(providers, vec!["anthropic".to_string(), "openai".to_string()]);
+        assert_eq!(
+            providers,
+            vec!["anthropic".to_string(), "openai".to_string()]
+        );
     }
 
     #[tokio::test]
     async fn provider_adapter_creation_fails_without_registered_provider() {
         let mut routing_config = RoutingConfig::default();
-        
+
         // Add a profile with credentials for the unregistered provider
         use crate::routing::Profile;
         let mut credentials = std::collections::HashMap::new();
-        credentials.insert("unregistered".to_string(), "literal:test-credential".to_string());
-        
+        credentials.insert(
+            "unregistered".to_string(),
+            "literal:test-credential".to_string(),
+        );
+
         routing_config.profiles.insert(
             "test-profile".to_string(),
             Profile {
@@ -128,19 +134,22 @@ mod tests {
                 models: Vec::new(),
             },
         );
-        
+
         let factory = ProviderAdapterFactory::new(routing_config);
-        
+
         let candidate = Candidate::new(
             "unregistered".to_string(),
             "model".to_string(),
             "test-profile".to_string(),
         );
-        
+
         let result = factory.create_adapter(&candidate).await;
         match result {
             Ok(adapter) => {
-                assert!(adapter.is_none(), "Expected None adapter for unregistered provider");
+                assert!(
+                    adapter.is_none(),
+                    "Expected None adapter for unregistered provider"
+                );
             }
             Err(e) => {
                 panic!("Expected Ok result but got error: {}", e);

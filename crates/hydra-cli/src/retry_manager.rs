@@ -1,4 +1,5 @@
 //! Retry/failover state management for provider adapters.
+#![allow(dead_code)]
 //!
 //! This module implements bounded retry logic with exponential backoff for
 //! transient failures, maintaining failover state between provider calls.
@@ -6,7 +7,7 @@
 use crate::routing::{Candidate, RoutingConfig, RoutingRequest};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Serializable timestamp for persistence.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -14,19 +15,14 @@ pub struct InstantWrapper {
     pub timestamp_secs: u64,
 }
 
-impl From<Instant> for InstantWrapper {
-    fn from(instant: Instant) -> Self {
+impl From<SystemTime> for InstantWrapper {
+    fn from(time: SystemTime) -> Self {
         Self {
-            timestamp_secs: instant.elapsed().as_secs(),
+            timestamp_secs: time
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs(),
         }
-    }
-}
-
-impl From<InstantWrapper> for Option<Instant> {
-    fn from(_wrapper: InstantWrapper) -> Self {
-        // This is a simplified conversion - in a real implementation you'd need
-        // to handle the actual timestamp properly
-        None
     }
 }
 
@@ -103,21 +99,25 @@ impl ProviderState {
     /// Mark a failed call.
     pub fn mark_failure(&mut self, error: String) {
         self.consecutive_failures += 1;
-        self.last_failure = Some(InstantWrapper::from(Instant::now()));
+        self.last_failure = Some(InstantWrapper::from(SystemTime::now()));
         self.failed_calls += 1;
         self.last_error = Some(error);
     }
 
     /// Check if this provider is currently healthy (not in cooldown).
     pub fn is_healthy(&self) -> bool {
-        // If we haven't failed recently, we're healthy
         if self.consecutive_failures == 0 {
             return true;
         }
-
-        // If we have failures, we're not healthy (simple cooldown model)
-        // In a real implementation, we'd check if enough time has passed since the last failure
-        false
+        let Some(last_failure) = &self.last_failure else {
+            return true;
+        };
+        let elapsed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs()
+            .saturating_sub(last_failure.timestamp_secs);
+        elapsed >= u64::from(self.consecutive_failures).min(300)
     }
 
     /// Get the backoff duration for this provider based on consecutive failures.
@@ -128,7 +128,9 @@ impl ProviderState {
 
         let mut backoff = retry_config.initial_backoff;
         for _ in 1..self.consecutive_failures {
-            backoff = Duration::from_millis((backoff.as_millis() as f64 * retry_config.backoff_multiplier) as u64);
+            backoff = Duration::from_millis(
+                (backoff.as_millis() as f64 * retry_config.backoff_multiplier) as u64,
+            );
             if backoff > retry_config.max_backoff {
                 backoff = retry_config.max_backoff;
                 break;
@@ -177,7 +179,7 @@ impl RetryManager {
     /// Get or create state for a provider candidate.
     pub fn get_or_create_state(&mut self, candidate: &Candidate) -> String {
         let key = self.get_candidate_key(candidate);
-        
+
         if !self.provider_states.contains_key(&key) {
             self.provider_states.insert(
                 key.clone(),
@@ -194,7 +196,10 @@ impl RetryManager {
 
     /// Get the candidate state key.
     fn get_candidate_key(&self, candidate: &Candidate) -> String {
-        format!("{}/{}/{}", candidate.provider, candidate.model, candidate.profile)
+        format!(
+            "{}/{}/{}",
+            candidate.provider, candidate.model, candidate.profile
+        )
     }
 
     /// Check if a candidate should be retried based on its state.
@@ -240,9 +245,15 @@ impl RetryManager {
     }
 
     /// Get candidates sorted by priority, excluding those that shouldn't be retried.
-    pub fn get_healthy_candidates(&self, request: &RoutingRequest, additional_candidates: &[Candidate]) -> Vec<Candidate> {
-        let all_candidates = self.routing_config.resolve_with_candidates(additional_candidates, request);
-        
+    pub fn get_healthy_candidates(
+        &self,
+        request: &RoutingRequest,
+        additional_candidates: &[Candidate],
+    ) -> Vec<Candidate> {
+        let all_candidates = self
+            .routing_config
+            .resolve_with_candidates(additional_candidates, request);
+
         all_candidates
             .into_iter()
             .filter(|candidate| self.should_retry(candidate))
@@ -350,23 +361,27 @@ mod tests {
     fn retry_manager_initializes_with_empty_states() {
         let routing_config = RoutingConfig::default();
         let manager = RetryManager::new(routing_config);
-        
+
         assert_eq!(manager.provider_states.len(), 0);
         assert!(manager.retry_config.max_attempts > 0);
     }
 
     #[test]
     fn provider_state_tracks_failures_success() {
-        let mut state = ProviderState::new("openai".to_string(), "gpt-4".to_string(), "primary".to_string());
-        
+        let mut state = ProviderState::new(
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            "primary".to_string(),
+        );
+
         assert_eq!(state.consecutive_failures, 0);
         assert_eq!(state.successful_calls, 0);
         assert_eq!(state.failed_calls, 0);
-        
+
         state.mark_success();
         assert_eq!(state.successful_calls, 1);
         assert_eq!(state.consecutive_failures, 0);
-        
+
         state.mark_failure("test error".to_string());
         assert_eq!(state.failed_calls, 1);
         assert_eq!(state.consecutive_failures, 1);
@@ -375,11 +390,15 @@ mod tests {
 
     #[test]
     fn provider_state_health_check() {
-        let mut state = ProviderState::new("openai".to_string(), "gpt-4".to_string(), "primary".to_string());
-        
+        let mut state = ProviderState::new(
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            "primary".to_string(),
+        );
+
         // Initially healthy
         assert!(state.is_healthy());
-        
+
         // After failure, not healthy (cooldown model)
         state.mark_failure("test error".to_string());
         assert!(!state.is_healthy());
@@ -387,22 +406,30 @@ mod tests {
 
     #[test]
     fn backoff_duration_increases_with_failures() {
-        let state = ProviderState::new("openai".to_string(), "gpt-4".to_string(), "primary".to_string());
+        let state = ProviderState::new(
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            "primary".to_string(),
+        );
         let retry_config = RetryConfig {
             enable_jitter: false,
             ..Default::default()
         };
-        
+
         let backoff1 = state.get_backoff_duration(&retry_config);
         assert_eq!(backoff1, Duration::from_millis(0));
-        
+
         // Create state with 1 failure
-        let mut state_with_failure = ProviderState::new("openai".to_string(), "gpt-4".to_string(), "primary".to_string());
+        let mut state_with_failure = ProviderState::new(
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            "primary".to_string(),
+        );
         state_with_failure.mark_failure("test".to_string());
         let backoff2 = state_with_failure.get_backoff_duration(&retry_config);
         assert!(backoff2 > Duration::from_millis(0));
         assert_eq!(backoff2, Duration::from_millis(1000));
-        
+
         // State with 2 failures
         state_with_failure.mark_failure("test".to_string());
         let backoff3 = state_with_failure.get_backoff_duration(&retry_config);
@@ -414,27 +441,31 @@ mod tests {
     fn retry_manager_should_retry_healthy_providers() {
         let routing_config = RoutingConfig::default();
         let mut manager = RetryManager::new(routing_config);
-        
-        let candidate = Candidate::new("openai".to_string(), "gpt-4".to_string(), "primary".to_string());
-        
+
+        let candidate = Candidate::new(
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            "primary".to_string(),
+        );
+
         // Initially, should retry (no state = healthy)
         assert!(manager.should_retry(&candidate));
-        
+
         // Get/create state to track it
         let _key = manager.get_or_create_state(&candidate);
-        
+
         // Mark success, should retry (healthy)
         manager.mark_success(&candidate);
         assert!(manager.should_retry(&candidate));
-        
+
         // Mark failure, should not retry (unhealthy but not exceeded max attempts yet)
         manager.mark_failure(&candidate, "test error".to_string());
         assert!(!manager.should_retry(&candidate));
-        
+
         // Mark success again, should retry
         manager.mark_success(&candidate);
         assert!(manager.should_retry(&candidate));
-        
+
         // Mark max failures, should not retry
         for _ in 0..manager.retry_config.max_attempts {
             manager.mark_failure(&candidate, "test error".to_string());
@@ -446,16 +477,20 @@ mod tests {
     fn retry_manager_manages_provider_states() {
         let routing_config = RoutingConfig::default();
         let mut manager = RetryManager::new(routing_config);
-        
-        let candidate = Candidate::new("openai".to_string(), "gpt-4".to_string(), "primary".to_string());
-        
+
+        let candidate = Candidate::new(
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            "primary".to_string(),
+        );
+
         // Get or create state
         let key = manager.get_or_create_state(&candidate);
         assert!(!key.is_empty());
-        
+
         // Mark success
         manager.mark_success(&candidate);
-        
+
         // Check status
         let statuses = manager.get_provider_status();
         assert_eq!(statuses.len(), 1);
@@ -467,8 +502,12 @@ mod tests {
     fn retry_context_creation() {
         let routing_config = RoutingConfig::default();
         let mut manager = RetryManager::new(routing_config);
-        let candidate = Candidate::new("openai".to_string(), "gpt-4".to_string(), "primary".to_string());
-        
+        let candidate = Candidate::new(
+            "openai".to_string(),
+            "gpt-4".to_string(),
+            "primary".to_string(),
+        );
+
         let context = RetryContext::new(&mut manager, candidate, 1);
         assert_eq!(context.attempt, 1);
         assert!(context.backoff_duration().is_zero());

@@ -1,8 +1,12 @@
 ﻿use std::collections::{HashMap, HashSet};
 
-use std::collections::VecDeque;
+use std::sync::Arc;
 
 use anyhow::Result;
+use tokio::sync::Semaphore;
+
+pub mod performance;
+pub use performance::*;
 
 /// A task that can be executed with dependencies.
 /// 
@@ -39,19 +43,19 @@ impl<T> TaskGraph<T>
 where
     T: Send + Sync + 'static,
 {
-    /// Create a new empty task graph.
+    /// Create a new empty task graph with default capacity.
     pub fn new() -> Self {
-        Self {
-            tasks: HashMap::new(),
-            dependency_counts: HashMap::new(),
-            dependents: HashMap::new(),
-            ready_tasks: Vec::new(),
-        }
+        Self::with_capacity(0)
     }
-    
-    /// Default implementation for TaskGraph.
-    pub fn default() -> Self {
-        Self::new()
+
+    /// Create a new task graph with pre-allocated capacity for better performance.
+    pub fn with_capacity(capacity: usize) -> Self {
+        Self {
+            tasks: HashMap::with_capacity(capacity),
+            dependency_counts: HashMap::with_capacity(capacity),
+            dependents: HashMap::with_capacity(capacity),
+            ready_tasks: Vec::with_capacity(capacity),
+        }
     }
     
     /// Add a task to the graph.
@@ -78,7 +82,7 @@ where
         for dep_id in &dependencies {
             self.dependents
                 .entry(dep_id.clone())
-                .or_insert_with(Vec::new)
+                .or_default()
                 .push(id.clone());
             
             *self.dependency_counts.entry(dep_id.clone()).or_default() += 1;
@@ -297,9 +301,13 @@ where
     /// concurrently while respecting dependencies and handling failures.
     pub async fn execute_concurrent(
         &self,
-        _max_concurrency: usize,
+        max_concurrency: usize,
         strategy: ExecutionStrategy,
     ) -> ExecutionResult<T> {
+        if strategy == ExecutionStrategy::Sequential {
+            return self.execute_sequential().await;
+        }
+
         if self.has_cycles() {
             return ExecutionResult {
                 successful: HashMap::new(),
@@ -310,49 +318,65 @@ where
 
         let mut results = HashMap::new();
         let mut errors = Vec::new();
-        
-        
-        // Find all tasks with no dependencies (ready to run)
-        let mut ready_queue: VecDeque<String> = VecDeque::new();
-        for task_id in self.task_ids() {
-            let has_deps = self.get_task_dependencies(task_id).iter().any(|dep| self.tasks.contains_key(dep));
-            if !has_deps {
-                ready_queue.push_back(task_id.clone());
+        let mut completed = HashSet::new();
+        let semaphore = Arc::new(Semaphore::new(max_concurrency.max(1)));
+
+        while completed.len() < self.tasks.len() {
+            let ready: Vec<String> = self
+                .tasks
+                .iter()
+                .filter(|(task_id, task)| {
+                    !completed.contains(*task_id)
+                        && task.dependencies().iter().all(|dependency| {
+                            completed.contains(dependency)
+                                && !errors.iter().any(|(id, _)| id == dependency)
+                        })
+                })
+                .map(|(task_id, _)| task_id.clone())
+                .collect();
+
+            if ready.is_empty() {
+                break;
             }
-        }
-        
-        // Collect results from independent tasks by cloning them
-        for task_id in &ready_queue {
-            if let Some(task) = self.tasks.get(task_id) {
-                let task_clone = task;
-                let task_id_clone = task_id.clone();
-                
-                match task_clone.execute().await {
-                    Ok(result) => {
-                        results.insert(task_id_clone, result);
+
+            let executions = ready.iter().filter_map(|task_id| {
+                self.tasks.get(task_id).map(|task| {
+                    let semaphore = semaphore.clone();
+                    let task_id = task_id.clone();
+                    async move {
+                        let _permit = semaphore.acquire().await;
+                        let result = task.execute().await;
+                        (task_id, result)
+                    }
+                })
+            });
+
+            for (task_id, result) in futures::future::join_all(executions).await {
+                completed.insert(task_id.clone());
+                match result {
+                    Ok(output) => {
+                        results.insert(task_id, output);
                     }
                     Err(error) => {
-                        errors.push((task_id_clone, error.to_string()));
-                    }
-                }
-            }
-        }
-        
-        // Execute remaining tasks sequentially if needed
-        if let Some(order) = self.topological_order() {
-            for task_id in order {
-                if !results.contains_key(&task_id) && !errors.iter().any(|(id, _)| id == &task_id) {
-                    if let Some(task) = self.tasks.get(&task_id) {
-                        match task.execute().await {
-                            Ok(result) => {
-                                results.insert(task_id.clone(), result);
-                            }
-                            Err(error) => {
-                                errors.push((task_id.clone(), error.to_string()));
-                            }
+                        errors.push((task_id, error.to_string()));
+                        if strategy == ExecutionStrategy::FailFast {
+                            return ExecutionResult {
+                                successful: results,
+                                failed: errors,
+                                strategy,
+                            };
                         }
                     }
                 }
+            }
+        }
+
+        for task_id in self.tasks.keys() {
+            if !completed.contains(task_id) {
+                errors.push((
+                    task_id.clone(),
+                    "Task dependency failed or is unresolved".to_string(),
+                ));
             }
         }
         
@@ -368,6 +392,15 @@ where
         self.tasks.get(task_id)
             .map(|task| task.dependencies())
             .unwrap_or_default()
+    }
+}
+
+impl<T> Default for TaskGraph<T>
+where
+    T: Send + Sync + 'static,
+{
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -729,7 +762,7 @@ mod tests {
         
         // Verify the graph still has task1 and works normally
         assert_eq!(graph.tasks.len(), 1, "Graph should contain only task1");
-        assert_eq!(graph.tasks.contains_key("task1"), true, "Graph should contain task1");
+        assert!(graph.tasks.contains_key("task1"), "Graph should contain task1");
     }
     
     #[tokio::test]

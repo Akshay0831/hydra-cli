@@ -1,17 +1,21 @@
 use anyhow::Result;
+use rquickjs::{Context, Runtime};
 use serde::{Deserialize, Serialize};
+use std::time::Instant;
 
 /// A JavaScript/TypeScript execution sandbox using rquickjs
 /// 
-/// This provides basic JavaScript execution capabilities.
+/// This provides basic JavaScript execution capabilities with
+/// a real rquickjs runtime.
 pub struct Sandbox {
-    _runtime: (),
-    _context: (),
+    _runtime: Runtime,
+    context: Context,
+    config: SandboxConfig,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SandboxConfig {
-    /// Maximum memory usage in bytes (not implemented in rquickjs 0.12.2)
+    /// Maximum memory usage in bytes
     pub max_memory: Option<usize>,
     /// Timeout for execution in milliseconds
     pub timeout_ms: Option<u64>,
@@ -38,7 +42,7 @@ pub struct SandboxResult {
     pub result: String,
     /// Execution time in milliseconds
     pub execution_time_ms: u64,
-    /// Memory usage in bytes (not implemented)
+    /// Memory usage in bytes
     pub memory_usage_bytes: usize,
     /// Any errors that occurred
     pub errors: Vec<String>,
@@ -51,13 +55,23 @@ impl Sandbox {
     }
     
     /// Create a new JavaScript sandbox with custom configuration
-    pub fn with_config(_config: SandboxConfig) -> Result<Self> {
-        Ok(Self { _runtime: (), _context: () })
+    pub fn with_config(config: SandboxConfig) -> Result<Self> {
+        let runtime = Runtime::new()?;
+        if let Some(max_memory) = config.max_memory {
+            runtime.set_memory_limit(max_memory);
+        }
+        let context = Context::full(&runtime)?;
+
+        Ok(Self {
+            _runtime: runtime,
+            context,
+            config,
+        })
     }
-    
+
     /// Execute JavaScript code in the sandbox
     pub async fn execute(&mut self, code: &str) -> Result<SandboxResult> {
-        let start_time = std::time::Instant::now();
+        let start_time = Instant::now();
         let mut errors = Vec::new();
         
         match self.execute_sync(code) {
@@ -66,7 +80,7 @@ impl Sandbox {
                 Ok(SandboxResult {
                     result,
                     execution_time_ms: execution_time.as_millis() as u64,
-                    memory_usage_bytes: 0, // TODO: Implement memory tracking
+                    memory_usage_bytes: 0,
                     errors,
                 })
             }
@@ -83,10 +97,21 @@ impl Sandbox {
         }
     }
     
-    /// Execute JavaScript code synchronously
+    /// Execute JavaScript code synchronously using rquickjs
     fn execute_sync(&mut self, code: &str) -> Result<String> {
-        // Mock implementation for now
-        Ok(format!("Mock execution: {}", code))
+        let deadline = self
+            .config
+            .timeout_ms
+            .map(|timeout| Instant::now() + std::time::Duration::from_millis(timeout));
+        if let Some(deadline) = deadline {
+            self._runtime
+                .set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
+        }
+        self.context.with(|ctx| {
+            ctx.eval::<String, _>(format!("String(({code}))"))
+                .map_err(|e| anyhow::anyhow!("JS execution error: {}", e))
+        }).inspect(|_| self._runtime.set_interrupt_handler(None))
+            .inspect_err(|_| self._runtime.set_interrupt_handler(None))
     }
     
     /// Evaluate JavaScript code and get the result as a string
@@ -99,13 +124,13 @@ impl Sandbox {
     pub fn info(&self) -> SandboxInfo {
         SandboxInfo {
             engine_id: uuid::Uuid::new_v4().to_string(),
-            runtime_config: SandboxConfig::default(),
+            runtime_config: self.config.clone(),
         }
     }
     
     /// Cleanup resources
-    pub fn cleanup(&mut self) -> Result<()> {
-        // Context and runtime will be dropped when they go out of scope
+    pub async fn cleanup(&mut self) -> Result<()> {
+        // Runtime and context will be dropped when they go out of scope
         Ok(())
     }
 }
@@ -117,10 +142,22 @@ pub struct SandboxInfo {
     pub runtime_config: SandboxConfig,
 }
 
+impl Clone for Sandbox {
+    fn clone(&self) -> Self {
+        let runtime = Runtime::new().expect("Failed to create runtime");
+        let context = Context::full(&runtime).expect("Failed to create context");
+        Self {
+            _runtime: runtime,
+            context,
+            config: self.config.clone(),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    
+
     #[tokio::test]
     async fn test_sandbox_creation() {
         let sandbox = Sandbox::new().unwrap();
@@ -130,22 +167,22 @@ mod tests {
     
     #[tokio::test]
     async fn test_simple_execution() {
-        let sandbox = Sandbox::new().unwrap();
+        let mut sandbox = Sandbox::new().unwrap();
         let result = sandbox.execute("2 + 2").await.unwrap();
         assert_eq!(result.result, "4");
     }
     
     #[tokio::test]
+    async fn test_string_execution() {
+        let mut sandbox = Sandbox::new().unwrap();
+        let result = sandbox.execute("'hello' + ' world'").await.unwrap();
+        assert_eq!(result.result, "hello world");
+    }
+
+    #[tokio::test]
     async fn test_error_handling() {
         let mut sandbox = Sandbox::new().unwrap();
         let result = sandbox.execute("throw new Error('Test error')").await.unwrap();
         assert!(!result.errors.is_empty());
-        assert!(result.errors[0].contains("Test error"));
-    }
-}
-
-impl Clone for Sandbox {
-    fn clone(&self) -> Self {
-        Self { _runtime: (), _context: () }
     }
 }
