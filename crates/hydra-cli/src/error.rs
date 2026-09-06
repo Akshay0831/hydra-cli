@@ -27,49 +27,27 @@ pub enum HydraCliError {
 
 #[derive(Debug, Clone)]
 pub struct ErrorContext {
-    operation: String,
     timestamp: std::time::Instant,
-    retry_count: u32,
 }
 
 impl ErrorContext {
-    pub fn new(operation: &str) -> Self {
+    pub fn new(_operation: &str) -> Self {
         Self {
-            operation: operation.to_string(),
             timestamp: std::time::Instant::now(),
-            retry_count: 0,
         }
-    }
-
-    pub fn with_retry_count(mut self, retry_count: u32) -> Self {
-        self.retry_count = retry_count;
-        self
     }
 
     pub fn elapsed_ms(&self) -> u64 {
         self.timestamp.elapsed().as_millis() as u64
     }
-
-    pub fn operation(&self) -> &str {
-        &self.operation
-    }
-
-    pub fn retry_count(&self) -> u32 {
-        self.retry_count
-    }
 }
 
-pub struct ErrorHandler {
-    max_retries: u32,
-    retry_config: RetryConfig,
-}
+pub struct ErrorHandler;
 
 impl ErrorHandler {
     pub fn new(max_retries: u32, retry_config: RetryConfig) -> Self {
-        Self {
-            max_retries,
-            retry_config,
-        }
+        let _ = (max_retries, retry_config);
+        Self
     }
 
     pub fn is_retryable(&self, error: &HydraCliError) -> bool {
@@ -88,39 +66,6 @@ impl ErrorHandler {
             }
             _ => false,
         }
-    }
-
-    pub async fn execute_with_retry<F, T>(
-        &self,
-        operation: &str,
-        mut operation_fn: F,
-    ) -> Result<T, HydraCliError>
-    where
-        F: FnMut() -> Result<T, HydraCliError>,
-    {
-        let mut last_error = None;
-        for attempt in 0..=self.max_retries {
-            match operation_fn() {
-                Ok(value) => return Ok(value),
-                Err(error) if attempt < self.max_retries && self.is_retryable(&error) => {
-                    let multiplier = self.retry_config.backoff_multiplier.powi(attempt as i32);
-                    let delay = self
-                        .retry_config
-                        .initial_backoff
-                        .mul_f64(multiplier)
-                        .min(self.retry_config.max_backoff);
-                    tokio::time::sleep(delay).await;
-                    last_error = Some(error);
-                }
-                Err(error) => {
-                    last_error = Some(error);
-                    break;
-                }
-            }
-        }
-        Err(last_error.unwrap_or_else(|| {
-            HydraCliError::TaskExecution(anyhow::anyhow!("{operation} failed without an error"))
-        }))
     }
 }
 

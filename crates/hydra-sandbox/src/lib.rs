@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use std::time::Instant;
 
 /// A JavaScript/TypeScript execution sandbox using rquickjs
-/// 
+///
 /// This provides basic JavaScript execution capabilities with
 /// a real rquickjs runtime.
 pub struct Sandbox {
@@ -29,7 +29,7 @@ impl Default for SandboxConfig {
     fn default() -> Self {
         Self {
             max_memory: Some(100 * 1024 * 1024), // 100MB default
-            timeout_ms: Some(30000), // 30 seconds default
+            timeout_ms: Some(30000),             // 30 seconds default
             enable_console: true,
             enable_modules: true,
         }
@@ -43,9 +43,19 @@ pub struct SandboxResult {
     /// Execution time in milliseconds
     pub execution_time_ms: u64,
     /// Memory usage in bytes
-    pub memory_usage_bytes: usize,
+    pub memory_usage_bytes: Option<usize>,
     /// Any errors that occurred
     pub errors: Vec<String>,
+    pub error_kind: Option<SandboxErrorKind>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Serialize, Deserialize)]
+pub enum SandboxErrorKind {
+    Syntax,
+    Runtime,
+    Timeout,
+    MemoryLimit,
+    Policy,
 }
 
 impl Sandbox {
@@ -53,7 +63,7 @@ impl Sandbox {
     pub fn new() -> Result<Self> {
         Self::with_config(SandboxConfig::default())
     }
-    
+
     /// Create a new JavaScript sandbox with custom configuration
     pub fn with_config(config: SandboxConfig) -> Result<Self> {
         let runtime = Runtime::new()?;
@@ -73,30 +83,63 @@ impl Sandbox {
     pub async fn execute(&mut self, code: &str) -> Result<SandboxResult> {
         let start_time = Instant::now();
         let mut errors = Vec::new();
-        
+
+        if !self.config.enable_console && code.contains("console.") {
+            return Ok(self.error_result(
+                "console access is disabled",
+                SandboxErrorKind::Policy,
+                start_time,
+            ));
+        }
+        if !self.config.enable_modules && (code.contains("import ") || code.contains("require(")) {
+            return Ok(self.error_result(
+                "module loading is disabled",
+                SandboxErrorKind::Policy,
+                start_time,
+            ));
+        }
+
         match self.execute_sync(code) {
             Ok(result) => {
                 let execution_time = start_time.elapsed();
                 Ok(SandboxResult {
                     result,
                     execution_time_ms: execution_time.as_millis() as u64,
-                    memory_usage_bytes: 0,
+                    memory_usage_bytes: None,
                     errors,
+                    error_kind: None,
                 })
             }
             Err(e) => {
-                errors.push(e.to_string());
+                let message = e.to_string();
+                errors.push(message.clone());
                 let execution_time = start_time.elapsed();
                 Ok(SandboxResult {
-                    result: format!("Error: {}", e),
+                    result: format!("Error: {message}"),
                     execution_time_ms: execution_time.as_millis() as u64,
-                    memory_usage_bytes: 0,
+                    memory_usage_bytes: None,
                     errors,
+                    error_kind: Some(classify_error(&message)),
                 })
             }
         }
     }
-    
+
+    fn error_result(
+        &self,
+        message: &str,
+        kind: SandboxErrorKind,
+        start_time: Instant,
+    ) -> SandboxResult {
+        SandboxResult {
+            result: format!("Error: {message}"),
+            execution_time_ms: start_time.elapsed().as_millis() as u64,
+            memory_usage_bytes: None,
+            errors: vec![message.to_string()],
+            error_kind: Some(kind),
+        }
+    }
+
     /// Execute JavaScript code synchronously using rquickjs
     fn execute_sync(&mut self, code: &str) -> Result<String> {
         let deadline = self
@@ -107,19 +150,20 @@ impl Sandbox {
             self._runtime
                 .set_interrupt_handler(Some(Box::new(move || Instant::now() >= deadline)));
         }
-        self.context.with(|ctx| {
+        let result = self.context.with(|ctx| {
             ctx.eval::<String, _>(format!("String(({code}))"))
                 .map_err(|e| anyhow::anyhow!("JS execution error: {}", e))
-        }).inspect(|_| self._runtime.set_interrupt_handler(None))
-            .inspect_err(|_| self._runtime.set_interrupt_handler(None))
+        });
+        self._runtime.set_interrupt_handler(None);
+        result
     }
-    
+
     /// Evaluate JavaScript code and get the result as a string
     pub async fn eval(&mut self, code: &str) -> Result<String> {
         let result = self.execute(code).await?;
         Ok(result.result)
     }
-    
+
     /// Get information about the sandbox
     pub fn info(&self) -> SandboxInfo {
         SandboxInfo {
@@ -127,10 +171,10 @@ impl Sandbox {
             runtime_config: self.config.clone(),
         }
     }
-    
+
     /// Cleanup resources
     pub async fn cleanup(&mut self) -> Result<()> {
-        // Runtime and context will be dropped when they go out of scope
+        self._runtime.set_interrupt_handler(None);
         Ok(())
     }
 }
@@ -142,15 +186,16 @@ pub struct SandboxInfo {
     pub runtime_config: SandboxConfig,
 }
 
-impl Clone for Sandbox {
-    fn clone(&self) -> Self {
-        let runtime = Runtime::new().expect("Failed to create runtime");
-        let context = Context::full(&runtime).expect("Failed to create context");
-        Self {
-            _runtime: runtime,
-            context,
-            config: self.config.clone(),
-        }
+fn classify_error(message: &str) -> SandboxErrorKind {
+    let lower = message.to_ascii_lowercase();
+    if lower.contains("interrupt") || lower.contains("timeout") {
+        SandboxErrorKind::Timeout
+    } else if lower.contains("memory") || lower.contains("out of memory") {
+        SandboxErrorKind::MemoryLimit
+    } else if lower.contains("syntax") || lower.contains("unexpected token") {
+        SandboxErrorKind::Syntax
+    } else {
+        SandboxErrorKind::Runtime
     }
 }
 
@@ -164,14 +209,14 @@ mod tests {
         let info = sandbox.info();
         assert!(!info.engine_id.is_empty());
     }
-    
+
     #[tokio::test]
     async fn test_simple_execution() {
         let mut sandbox = Sandbox::new().unwrap();
         let result = sandbox.execute("2 + 2").await.unwrap();
         assert_eq!(result.result, "4");
     }
-    
+
     #[tokio::test]
     async fn test_string_execution() {
         let mut sandbox = Sandbox::new().unwrap();
@@ -182,7 +227,11 @@ mod tests {
     #[tokio::test]
     async fn test_error_handling() {
         let mut sandbox = Sandbox::new().unwrap();
-        let result = sandbox.execute("throw new Error('Test error')").await.unwrap();
+        let result = sandbox
+            .execute("throw new Error('Test error')")
+            .await
+            .unwrap();
         assert!(!result.errors.is_empty());
+        assert_eq!(result.error_kind, Some(SandboxErrorKind::Runtime));
     }
 }

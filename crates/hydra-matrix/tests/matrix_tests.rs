@@ -33,7 +33,7 @@ pub fn main_function() {
         _ => {}
     }
 }
-"#
+"#,
             ),
             (
                 temp_dir.path().join("example.js"),
@@ -55,7 +55,7 @@ class ExampleClass {
 }
 
 const example = new ExampleClass();
-"#
+"#,
             ),
             (
                 temp_dir.path().join("example.ts"),
@@ -76,7 +76,7 @@ class TypeScriptClass implements TypeScriptInterface {
 export function exampleTypeScriptFunction(data: TypeScriptInterface): string {
     return `ID: ${data.id}, Name: ${data.name}`;
 }
-"#
+"#,
             ),
         ];
 
@@ -95,7 +95,8 @@ export function exampleTypeScriptFunction(data: TypeScriptInterface): string {
 
         // Update config to point to temp directory
         matrix.config.paths = vec![temp_dir.path().to_string_lossy().to_string()];
-        matrix.config.include_patterns = vec!["*.rs".to_string(), "*.js".to_string(), "*.ts".to_string()];
+        matrix.config.include_patterns =
+            vec!["*.rs".to_string(), "*.js".to_string(), "*.ts".to_string()];
         matrix.config.exclude_patterns = vec!["**/node_modules/**".to_string()];
 
         let indexed_count = matrix.index().await.unwrap();
@@ -178,20 +179,26 @@ export function exampleTypeScriptFunction(data: TypeScriptInterface): string {
         let _test_files = create_test_files(&temp_dir).await;
 
         matrix.config.paths = vec![temp_dir.path().to_string_lossy().to_string()];
-        matrix.config.include_patterns = vec![
-            "*.rs".to_string(),
-            "*.js".to_string(),
-            "*.ts".to_string(),
-        ];
+        matrix.config.include_patterns =
+            vec!["*.rs".to_string(), "*.js".to_string(), "*.ts".to_string()];
         matrix.config.exclude_patterns = vec!["**/node_modules/**".to_string()];
 
         let indexed_count = matrix.index().await.unwrap();
         assert!(indexed_count >= 3, "Should index all test files");
 
         let stats = matrix.get_stats().await;
-        assert!(stats.functions > 0, "Should have functions from multiple languages");
-        assert!(stats.classes > 0, "Should have classes from multiple languages");
-        assert!(stats.interfaces > 0, "Should have interfaces from multiple languages");
+        assert!(
+            stats.functions > 0,
+            "Should have functions from multiple languages"
+        );
+        assert!(
+            stats.classes > 0,
+            "Should have classes from multiple languages"
+        );
+        assert!(
+            stats.interfaces > 0,
+            "Should have interfaces from multiple languages"
+        );
     }
 
     #[tokio::test]
@@ -287,7 +294,8 @@ export function exampleTypeScriptFunction(data: TypeScriptInterface): string {
         let _test_files = create_test_files(&temp_dir).await;
 
         matrix.config.paths = vec![temp_dir.path().to_string_lossy().to_string()];
-        matrix.config.include_patterns = vec!["*.rs".to_string(), "*.js".to_string(), "*.ts".to_string()];
+        matrix.config.include_patterns =
+            vec!["*.rs".to_string(), "*.js".to_string(), "*.ts".to_string()];
         matrix.config.exclude_patterns = vec!["**/node_modules/**".to_string()];
 
         matrix.index().await.unwrap();

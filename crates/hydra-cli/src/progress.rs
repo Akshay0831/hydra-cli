@@ -27,7 +27,11 @@ impl CliFeedback {
             spinner.stop();
         }
         print!("{}\r", " ".repeat(60));
-        std::io::Write::flush(&mut std::io::stdout()).unwrap();
+        let _ = std::io::Write::flush(&mut std::io::stdout());
+    }
+
+    pub fn spinner_guard(&mut self) -> SpinnerGuard<'_> {
+        SpinnerGuard { feedback: self }
     }
 
     pub fn update_spinner(&mut self, message: String) {
@@ -46,6 +50,16 @@ impl CliFeedback {
 
     pub fn warning_message(&self, message: String) {
         eprintln!("⚠️  {message}");
+    }
+}
+
+pub struct SpinnerGuard<'a> {
+    feedback: &'a mut CliFeedback,
+}
+
+impl Drop for SpinnerGuard<'_> {
+    fn drop(&mut self) {
+        self.feedback.stop_spinner();
     }
 }
 
@@ -75,10 +89,6 @@ impl ProgressInfo {
             estimated_remaining: None,
             message: None,
         }
-    }
-
-    fn increment(&mut self) {
-        self.set_current(self.current.saturating_add(1));
     }
 
     fn set_message(&mut self, message: String) {
@@ -142,15 +152,6 @@ impl ProgressBar {
     fn with_width(mut self, width: usize) -> Self {
         self.width = width;
         self
-    }
-
-    pub fn increment(&self) {
-        let mut info = self
-            .progress_info
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        info.increment();
-        self.print(&info);
     }
 
     pub fn set_current(&self, current: usize) {
@@ -355,7 +356,7 @@ mod tests {
     #[test]
     fn progress_bar_reports_completion() {
         let progress = ProgressBar::new("test".to_string(), 2);
-        progress.increment();
+        progress.set_current(1);
         progress.set_message("Processing".to_string());
         progress.complete();
     }

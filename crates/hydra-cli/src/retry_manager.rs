@@ -3,7 +3,9 @@
 //! This module implements bounded retry logic with exponential backoff for
 //! transient failures, maintaining failover state between provider calls.
 
+use crate::retry_state_store::{RetryState, RetryStateStore};
 use crate::routing::{Candidate, RoutingConfig, RoutingRequest};
+use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -155,6 +157,8 @@ pub struct RetryManager {
     pub provider_states: HashMap<String, ProviderState>,
     /// Configuration for routing.
     pub routing_config: RoutingConfig,
+    /// Path to retry state store.
+    state_store_path: Option<std::path::PathBuf>,
 }
 
 impl RetryManager {
@@ -175,11 +179,33 @@ impl RetryManager {
         }
     }
 
+    /// Enable persistent state storage.
+    pub fn with_state_store(mut self, path: std::path::PathBuf) -> Self {
+        self.state_store_path = Some(path.clone());
+        // Load existing state if available
+        if let Ok(state) = RetryStateStore::load(&path) {
+            self.provider_states = state.provider_states;
+        }
+        self
+    }
+
     /// Get or create state for a provider candidate.
     pub fn get_or_create_state(&mut self, candidate: &Candidate) -> String {
         let key = self.get_candidate_key(candidate);
 
         if !self.provider_states.contains_key(&key) {
+            // Check if we have persistent state
+            if let Some(ref path) = self.state_store_path {
+                if let Ok(state) = RetryStateStore::load(path) {
+                    if let Some(persistent_state) = state.provider_states.get(&key) {
+                        self.provider_states
+                            .insert(key.clone(), persistent_state.clone());
+                        return key;
+                    }
+                }
+            }
+
+            // Create new state
             self.provider_states.insert(
                 key.clone(),
                 ProviderState::new(
@@ -191,6 +217,18 @@ impl RetryManager {
         }
 
         key
+    }
+
+    /// Save state to persistent storage.
+    pub fn save_state(&self) -> Result<()> {
+        if let Some(ref path) = self.state_store_path {
+            let state = RetryState {
+                provider_states: self.provider_states.clone(),
+                last_updated: SystemTime::now(),
+            };
+            RetryStateStore::save(path, &state)?;
+        }
+        Ok(())
     }
 
     /// Get the candidate state key.
@@ -224,6 +262,8 @@ impl RetryManager {
         if let Some(state) = self.provider_states.get_mut(&key) {
             state.mark_success();
         }
+        // Save state after marking success
+        let _ = self.save_state();
     }
 
     /// Mark a failed call for a candidate.
@@ -232,6 +272,8 @@ impl RetryManager {
         if let Some(state) = self.provider_states.get_mut(&key) {
             state.mark_failure(error);
         }
+        // Save state after marking failure
+        let _ = self.save_state();
     }
 
     /// Get the next backoff duration for a candidate.
@@ -276,25 +318,6 @@ impl RetryManager {
             })
             .collect()
     }
-
-    /// Reset state for a specific provider.
-    pub fn reset_provider(&mut self, provider: &str, model: &str, profile: &str) {
-        let key = format!("{}/{}/{}", provider, model, profile);
-        if let Some(state) = self.provider_states.get_mut(&key) {
-            state.consecutive_failures = 0;
-            state.last_failure = None;
-            state.last_error = None;
-        }
-    }
-
-    /// Reset all provider states.
-    pub fn reset_all(&mut self) {
-        for state in self.provider_states.values_mut() {
-            state.consecutive_failures = 0;
-            state.last_failure = None;
-            state.last_error = None;
-        }
-    }
 }
 
 /// Status information for a provider.
@@ -308,46 +331,6 @@ pub struct ProviderStatus {
     pub successful_calls: u64,
     pub failed_calls: u64,
     pub last_error: Option<String>,
-}
-
-/// Retry execution context for a specific operation.
-pub struct RetryContext<'a> {
-    /// The retry manager.
-    pub manager: &'a mut RetryManager,
-    /// The candidate being retried.
-    pub candidate: Candidate,
-    /// The current attempt number.
-    pub attempt: u32,
-    /// The backoff duration for this attempt.
-    pub backoff: Duration,
-}
-
-impl<'a> RetryContext<'a> {
-    /// Create a new retry context.
-    pub fn new(manager: &'a mut RetryManager, candidate: Candidate, attempt: u32) -> Self {
-        let backoff = manager.get_backoff_duration(&candidate);
-        Self {
-            manager,
-            candidate,
-            attempt,
-            backoff,
-        }
-    }
-
-    /// Mark the operation as successful.
-    pub fn mark_success(self) {
-        self.manager.mark_success(&self.candidate);
-    }
-
-    /// Mark the operation as failed.
-    pub fn mark_failure(self, error: String) {
-        self.manager.mark_failure(&self.candidate, error);
-    }
-
-    /// Get the current backoff duration.
-    pub fn backoff_duration(&self) -> Duration {
-        self.backoff.saturating_mul(self.attempt.max(1))
-    }
 }
 
 #[cfg(test)]
@@ -500,15 +483,13 @@ mod tests {
     #[test]
     fn retry_context_creation() {
         let routing_config = RoutingConfig::default();
-        let mut manager = RetryManager::new(routing_config);
+        let manager = RetryManager::new(routing_config);
         let candidate = Candidate::new(
             "openai".to_string(),
             "gpt-4".to_string(),
             "primary".to_string(),
         );
 
-        let context = RetryContext::new(&mut manager, candidate, 1);
-        assert_eq!(context.attempt, 1);
-        assert!(context.backoff_duration().is_zero());
+        assert!(manager.get_backoff_duration(&candidate).is_zero());
     }
 }

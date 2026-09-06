@@ -1,10 +1,10 @@
-﻿use anyhow::Result;
+use anyhow::Result;
+use glob::Pattern;
+use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
-use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
-use glob::Pattern;
 
 /// A code element that can be indexed and searched
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -106,6 +106,13 @@ pub struct CodeMatrix {
     language_parsers: HashMap<String, Box<dyn LanguageParser>>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct PersistedIndex {
+    config: IndexConfig,
+    stats: IndexStats,
+    elements: Vec<CodeElement>,
+}
+
 /// Trait for language-specific parsing
 pub trait LanguageParser: Send + Sync {
     fn supported_extensions(&self) -> Vec<&str>;
@@ -113,93 +120,127 @@ pub trait LanguageParser: Send + Sync {
     fn extract_dependencies(&self, content: &str) -> Result<Vec<String>>;
 }
 
-
+fn make_element(
+    file_path: &Path,
+    line_number: usize,
+    element_type: ElementType,
+    name: String,
+    content: &str,
+    dependencies: Vec<String>,
+) -> CodeElement {
+    CodeElement {
+        id: format!("{}:{}:{}", file_path.display(), line_number, name),
+        file_path: file_path.to_path_buf(),
+        element_type,
+        name,
+        line_number,
+        content: content.to_string(),
+        dependencies,
+        metadata: HashMap::new(),
+    }
+}
 
 /// Language-specific parsers
 mod parsers {
     use super::*;
-    
+
     /// Simple placeholder parsers (temporary implementation)
     pub struct RustParser;
     pub struct JSTypeScriptParser;
-    
+
     impl LanguageParser for RustParser {
         fn supported_extensions(&self) -> Vec<&str> {
             vec!["rs"]
         }
-        
+
         fn parse_file(&self, file_path: &Path, content: &str) -> Result<Vec<CodeElement>> {
             let mut elements = Vec::new();
-            
+
             for (line_num, line) in content.lines().enumerate() {
                 let declaration = line.trim().strip_prefix("pub ").unwrap_or(line.trim());
                 if declaration.starts_with("fn ") {
-                    let name = declaration.strip_prefix("fn ").unwrap().split('(').next().unwrap().trim();
-                    elements.push(CodeElement {
-                        id: format!("{}:{}:{}", file_path.display(), line_num, name),
-                        file_path: file_path.to_path_buf(),
-                        element_type: ElementType::Function,
-                        name: name.to_string(),
-                        line_number: line_num + 1,
-                        content: line.to_string(),
-                        dependencies: Vec::new(),
-                        metadata: HashMap::new(),
-                    });
+                    if let Some(name) = declaration
+                        .strip_prefix("fn ")
+                        .and_then(|value| value.split('(').next())
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                    {
+                        elements.push(make_element(
+                            file_path,
+                            line_num + 1,
+                            ElementType::Function,
+                            name.to_string(),
+                            line,
+                            Vec::new(),
+                        ));
+                    }
                 } else if declaration.starts_with("struct ") {
-                    let name = declaration.strip_prefix("struct ").unwrap().split('{').next().unwrap().trim();
-                    elements.push(CodeElement {
-                        id: format!("{}:{}:{}", file_path.display(), line_num, name),
-                        file_path: file_path.to_path_buf(),
-                        element_type: ElementType::Struct,
-                        name: name.to_string(),
-                        line_number: line_num + 1,
-                        content: line.to_string(),
-                        dependencies: Vec::new(),
-                        metadata: HashMap::new(),
-                    });
+                    if let Some(name) = declaration
+                        .strip_prefix("struct ")
+                        .and_then(|value| value.split('{').next())
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                    {
+                        elements.push(make_element(
+                            file_path,
+                            line_num + 1,
+                            ElementType::Struct,
+                            name.to_string(),
+                            line,
+                            Vec::new(),
+                        ));
+                    }
                 } else if declaration.starts_with("enum ") {
-                    let name = declaration.strip_prefix("enum ").unwrap().split('{').next().unwrap().trim();
-                    elements.push(CodeElement {
-                        id: format!("{}:{}:{}", file_path.display(), line_num, name),
-                        file_path: file_path.to_path_buf(),
-                        element_type: ElementType::Enum,
-                        name: name.to_string(),
-                        line_number: line_num + 1,
-                        content: line.to_string(),
-                        dependencies: Vec::new(),
-                        metadata: HashMap::new(),
-                    });
+                    if let Some(name) = declaration
+                        .strip_prefix("enum ")
+                        .and_then(|value| value.split('{').next())
+                        .map(str::trim)
+                        .filter(|name| !name.is_empty())
+                    {
+                        elements.push(make_element(
+                            file_path,
+                            line_num + 1,
+                            ElementType::Enum,
+                            name.to_string(),
+                            line,
+                            Vec::new(),
+                        ));
+                    }
                 }
             }
-            
+
             Ok(elements)
         }
-        
+
         fn extract_dependencies(&self, content: &str) -> Result<Vec<String>> {
             let mut dependencies = Vec::new();
-            
+
             // Simple use statement extraction
             for line in content.lines() {
                 if line.trim().starts_with("use ") {
-                    let dep = line.trim().strip_prefix("use ").unwrap().trim_end_matches(';').trim();
-                    if !dep.is_empty() {
+                    if let Some(dep) = line
+                        .trim()
+                        .strip_prefix("use ")
+                        .map(|value| value.trim_end_matches(';').trim())
+                        .filter(|dep| !dep.is_empty())
+                    {
                         dependencies.push(dep.to_string());
                     }
                 }
             }
-            
+
             Ok(dependencies)
         }
     }
-    
+
     impl LanguageParser for JSTypeScriptParser {
         fn supported_extensions(&self) -> Vec<&str> {
             vec!["js", "ts", "jsx", "tsx"]
         }
-        
+
         fn parse_file(&self, file_path: &Path, content: &str) -> Result<Vec<CodeElement>> {
             let mut elements = Vec::new();
-            
+
             // Simple text-based parsing for demo
             for (line_num, line) in content.lines().enumerate() {
                 let declaration = line.trim().strip_prefix("export ").unwrap_or(line.trim());
@@ -218,7 +259,7 @@ mod parsers {
                         .unwrap_or("")
                         .trim_end_matches(':')
                         .trim();
-                    
+
                     if !name.is_empty() {
                         let element_type = if declaration.starts_with("function ") {
                             ElementType::Function
@@ -229,30 +270,30 @@ mod parsers {
                         } else {
                             ElementType::Variable
                         };
-                        
-                        elements.push(CodeElement {
-                            id: format!("{}:{}:{}", file_path.display(), line_num, name),
-                            file_path: file_path.to_path_buf(),
+
+                        elements.push(make_element(
+                            file_path,
+                            line_num + 1,
                             element_type,
-                            name: name.to_string(),
-                            line_number: line_num + 1,
-                            content: line.to_string(),
-                            dependencies: Vec::new(),
-                            metadata: HashMap::new(),
-                        });
+                            name.to_string(),
+                            line,
+                            Vec::new(),
+                        ));
                     }
                 }
             }
-            
+
             Ok(elements)
         }
-        
+
         fn extract_dependencies(&self, content: &str) -> Result<Vec<String>> {
             let mut dependencies = Vec::new();
-            
+
             // Simple import/require extraction
             for line in content.lines() {
-                if line.trim().starts_with("import ") || line.trim().starts_with("const ") && line.contains("require(") {
+                if line.trim().starts_with("import ")
+                    || line.trim().starts_with("const ") && line.contains("require(")
+                {
                     let dep = line
                         .trim()
                         .split('"')
@@ -261,13 +302,13 @@ mod parsers {
                         .split("'")
                         .next()
                         .unwrap_or("");
-                    
+
                     if !dep.is_empty() {
                         dependencies.push(dep.to_string());
                     }
                 }
             }
-            
+
             Ok(dependencies)
         }
     }
@@ -278,41 +319,60 @@ impl CodeMatrix {
     pub fn new() -> Result<Self> {
         Self::with_config(IndexConfig::default())
     }
-    
+
     /// Create a new CodeMatrix with custom configuration
     pub fn with_config(config: IndexConfig) -> Result<Self> {
         let mut language_parsers = HashMap::new();
-        language_parsers.insert("rs".to_string(), Box::new(parsers::RustParser) as Box<dyn LanguageParser>);
-        language_parsers.insert("js".to_string(), Box::new(parsers::JSTypeScriptParser) as Box<dyn LanguageParser>);
-        language_parsers.insert("jsx".to_string(), Box::new(parsers::JSTypeScriptParser) as Box<dyn LanguageParser>);
-        language_parsers.insert("ts".to_string(), Box::new(parsers::JSTypeScriptParser) as Box<dyn LanguageParser>);
-        language_parsers.insert("tsx".to_string(), Box::new(parsers::JSTypeScriptParser) as Box<dyn LanguageParser>);
-        
+        language_parsers.insert(
+            "rs".to_string(),
+            Box::new(parsers::RustParser) as Box<dyn LanguageParser>,
+        );
+        language_parsers.insert(
+            "js".to_string(),
+            Box::new(parsers::JSTypeScriptParser) as Box<dyn LanguageParser>,
+        );
+        language_parsers.insert(
+            "jsx".to_string(),
+            Box::new(parsers::JSTypeScriptParser) as Box<dyn LanguageParser>,
+        );
+        language_parsers.insert(
+            "ts".to_string(),
+            Box::new(parsers::JSTypeScriptParser) as Box<dyn LanguageParser>,
+        );
+        language_parsers.insert(
+            "tsx".to_string(),
+            Box::new(parsers::JSTypeScriptParser) as Box<dyn LanguageParser>,
+        );
+
         Ok(Self {
             index: RwLock::new(HashMap::new()),
             config,
             language_parsers,
         })
     }
-    
+
     /// Index code from the configured paths
     pub async fn index(&mut self) -> Result<usize> {
         let mut indexed_files = 0;
+        let mut seen_files = HashSet::new();
         let paths = self.config.paths.clone();
-        
+
         for pattern in &paths {
             let matched_files = self.collect_matching_files(pattern)?;
-            
+
             for file_path in matched_files {
-                if self.should_index_file(&file_path).await? && self.index_file(&file_path).await? {
-                        indexed_files += 1;
-                    }
+                if seen_files.insert(file_path.clone())
+                    && self.should_index_file(&file_path).await?
+                    && self.index_file(&file_path).await?
+                {
+                    indexed_files += 1;
+                }
             }
         }
-        
+
         Ok(indexed_files)
     }
-    
+
     /// Index a specific file
     pub async fn index_file(&mut self, file_path: &Path) -> Result<bool> {
         // Check file size
@@ -320,80 +380,81 @@ impl CodeMatrix {
         if metadata.len() > self.config.max_file_size as u64 {
             return Ok(false);
         }
-        
+
         // Read file content
         let content = tokio::fs::read_to_string(file_path).await?;
-        
+
         // Get file extension
-        let extension = file_path.extension()
+        let extension = file_path
+            .extension()
             .and_then(|ext| ext.to_str())
             .unwrap_or("");
-        
+
         // Get appropriate parser
         if let Some(parser) = self.language_parsers.get(extension) {
             let elements = parser.parse_file(file_path, &content)?;
             let dependencies = parser.extract_dependencies(&content)?;
-            
+
             // Add elements to index
             let mut index = self.index.write().await;
             for mut element in elements {
                 element.dependencies = dependencies.clone();
                 index.insert(element.id.clone(), element);
             }
-            
+
             Ok(true)
         } else {
             Ok(false) // Unsupported file type
         }
     }
-    
+
     /// Search for code elements matching the query
     pub async fn search(&self, query: &str) -> Result<Vec<CodeElement>> {
         let index = self.index.read().await;
         let mut results = Vec::new();
-        
+
         for element in index.values() {
             if self.element_matches_query(element, query) {
                 results.push(element.clone());
             }
         }
-        
-        Ok(results)
+
+        Ok(sort_elements(results))
     }
-    
+
     /// Search for code elements by type
     pub async fn search_by_type(&self, element_type: ElementType) -> Result<Vec<CodeElement>> {
         let index = self.index.read().await;
         let mut results = Vec::new();
-        
+
         for element in index.values() {
             if element.element_type == element_type {
                 results.push(element.clone());
             }
         }
-        
-        Ok(results)
+
+        Ok(sort_elements(results))
     }
-    
+
     /// Search for code elements by name
     pub async fn search_by_name(&self, name: &str) -> Result<Vec<CodeElement>> {
         let index = self.index.read().await;
         let mut results = Vec::new();
-        
+
         for element in index.values() {
             if element.name.contains(name) {
                 results.push(element.clone());
             }
         }
-        
-        Ok(results)
+
+        Ok(sort_elements(results))
     }
-    
+
     /// Find all dependencies for a code element
     pub async fn find_dependencies(&self, element_id: &str) -> Result<Vec<CodeElement>> {
         let index = self.index.read().await;
         let mut dependencies = Vec::new();
-        
+
         if let Some(element) = index.get(element_id) {
             for dep_name in &element.dependencies {
                 for dep_element in index.values() {
@@ -403,41 +464,69 @@ impl CodeMatrix {
                 }
             }
         }
-        
-        Ok(dependencies)
+
+        Ok(sort_elements(dependencies))
     }
-    
+
     /// Find all dependents of a code element
     pub async fn find_dependents(&self, element_id: &str) -> Result<Vec<CodeElement>> {
         let index = self.index.read().await;
         let mut dependents = Vec::new();
-        
+
         if let Some(element) = index.get(element_id) {
             for dependent in index.values() {
-                if dependent.dependencies.contains(&element.name) || dependent.dependencies.contains(&element.id) {
+                if dependent.dependencies.contains(&element.name)
+                    || dependent.dependencies.contains(&element.id)
+                {
                     dependents.push(dependent.clone());
                 }
             }
         }
-        
-        Ok(dependents)
+
+        Ok(sort_elements(dependents))
     }
-    
+
     /// Get the total number of indexed elements
     pub async fn size(&self) -> usize {
         self.index.read().await.len()
     }
-    
+
     /// Clear the index
     pub async fn clear(&self) {
         self.index.write().await.clear();
     }
-    
+
+    pub async fn save_index(&self, path: &Path) -> Result<()> {
+        let index = self.index.read().await;
+        let elements = sort_elements(index.values().cloned().collect());
+        drop(index);
+        let snapshot = PersistedIndex {
+            config: self.config.clone(),
+            stats: self.get_stats().await,
+            elements,
+        };
+        let contents = serde_json::to_string_pretty(&snapshot)?;
+        tokio::fs::write(path, contents).await?;
+        Ok(())
+    }
+
+    pub async fn load_index(path: &Path) -> Result<Self> {
+        let contents = tokio::fs::read_to_string(path).await?;
+        let snapshot: PersistedIndex = serde_json::from_str(&contents)?;
+        let matrix = Self::with_config(snapshot.config)?;
+        let mut index = matrix.index.write().await;
+        for element in snapshot.elements {
+            index.insert(element.id.clone(), element);
+        }
+        drop(index);
+        Ok(matrix)
+    }
+
     /// Get statistics about the index
     pub async fn get_stats(&self) -> IndexStats {
         let index = self.index.read().await;
         let mut stats = IndexStats::default();
-        
+
         for element in index.values() {
             stats.total_elements += 1;
             match element.element_type {
@@ -456,13 +545,13 @@ impl CodeMatrix {
                     stats.others += 1;
                 }
             }
-            
+
             stats.files.insert(element.file_path.clone());
         }
-        
+
         stats
     }
-    
+
     /// Collect matching files based on glob patterns
     fn collect_matching_files(&self, pattern: &str) -> Result<Vec<PathBuf>> {
         let mut files = Vec::new();
@@ -475,56 +564,83 @@ impl CodeMatrix {
             .unwrap_or(pattern)
             .trim_end_matches(['/', '\\']);
         let root = if root.is_empty() { "." } else { root };
-        
+        let root_path = Path::new(root);
+        if !root_path.exists() {
+            anyhow::bail!("index root does not exist: {}", root_path.display());
+        }
+        if root_path.is_file() {
+            if matches_all_files {
+                return Ok(vec![root_path.to_path_buf()]);
+            }
+            anyhow::bail!("index root must be a directory: {}", root_path.display());
+        }
+
         for entry in WalkDir::new(root)
             .follow_links(self.config.follow_symlinks)
             .into_iter()
             .filter_entry(|e| {
-            if e.path().is_dir() && e.path().components().count() > 2 {
-                return !e.path().components().any(|c| {
-                    matches!(c.as_os_str().to_str(), Some("node_modules" | "target" | ".git"))
-                });
-            }
-            true
-        }) {
+                if e.path().is_dir() {
+                    return !self.matches_exclude(e.path());
+                }
+                true
+            })
+        {
             let entry = entry?;
             let path = entry.path();
-            
+
             if path.is_file()
-                && (matches_all_files || pattern_obj.matches(path.to_str().unwrap_or("")))
+                && !self.matches_exclude(path)
+                && (matches_all_files
+                    || pattern_obj.matches(&path.to_string_lossy().replace('\\', "/")))
             {
-                    files.push(path.to_path_buf());
-                }
+                files.push(path.to_path_buf());
+            }
         }
-        
+
+        files.sort();
+        files.dedup();
         Ok(files)
     }
-    
+
+    fn matches_exclude(&self, path: &Path) -> bool {
+        let normalized = path.to_string_lossy().replace('\\', "/");
+        self.config.exclude_patterns.iter().any(|pattern| {
+            Pattern::new(pattern).is_ok_and(|glob| glob.matches(&normalized))
+                || Pattern::new(&format!("**/{pattern}"))
+                    .is_ok_and(|glob| glob.matches(&normalized))
+        })
+    }
+
     /// Check if a file should be indexed based on configuration
     async fn should_index_file(&self, file_path: &Path) -> Result<bool> {
-        let file_str = file_path.to_string_lossy().to_string();
-        
+        let file_str = file_path.to_string_lossy().replace('\\', "/");
+
         // Check include patterns
-        let file_name = file_path.file_name().and_then(|name| name.to_str()).unwrap_or("");
-        let should_include = self.config.include_patterns.is_empty() ||
-            self.config.include_patterns.iter().any(|pattern| {
+        let file_name = file_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("");
+        let should_include = self.config.include_patterns.is_empty()
+            || self.config.include_patterns.iter().any(|pattern| {
                 Pattern::new(pattern).is_ok_and(|p| p.matches(file_name) || p.matches(&file_str))
             });
-        
+
         // Check exclude patterns
-        let should_exclude = self.config.exclude_patterns.iter().any(|pattern| {
-            Pattern::new(pattern).is_ok_and(|p| p.matches(&file_str))
-        });
-        
+        let should_exclude = self.matches_exclude(file_path);
+
         Ok(should_include && !should_exclude)
     }
-    
+
     /// Check if an element matches the search query
     pub fn element_matches_query(&self, element: &CodeElement, query: &str) -> bool {
         let query_lower = query.to_lowercase();
-        element.name.to_lowercase().contains(&query_lower) ||
-        element.content.to_lowercase().contains(&query_lower) ||
-        element.element_type.to_string().to_lowercase().contains(&query_lower)
+        element.name.to_lowercase().contains(&query_lower)
+            || element.content.to_lowercase().contains(&query_lower)
+            || element
+                .element_type
+                .to_string()
+                .to_lowercase()
+                .contains(&query_lower)
     }
 }
 
@@ -544,4 +660,19 @@ pub struct IndexStats {
     pub imports: usize,
     pub others: usize,
     pub files: HashSet<PathBuf>,
+}
+
+fn sort_elements(mut elements: Vec<CodeElement>) -> Vec<CodeElement> {
+    elements.sort_by(|left, right| {
+        left.file_path
+            .cmp(&right.file_path)
+            .then_with(|| left.line_number.cmp(&right.line_number))
+            .then_with(|| {
+                left.element_type
+                    .to_string()
+                    .cmp(&right.element_type.to_string())
+            })
+            .then_with(|| left.name.cmp(&right.name))
+    });
+    elements
 }

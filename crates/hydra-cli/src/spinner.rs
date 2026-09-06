@@ -1,6 +1,7 @@
 //! Spinner utilities for CLI operations.
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::task::JoinHandle;
 use tokio::time::interval;
 
 /// Enhanced spinner with message rotation.
@@ -10,6 +11,7 @@ pub struct EnhancedSpinner {
     status_messages: Vec<String>,
     current_index: Arc<Mutex<usize>>,
     running: Arc<Mutex<bool>>,
+    task: Arc<Mutex<Option<JoinHandle<()>>>>,
 }
 
 impl EnhancedSpinner {
@@ -19,6 +21,7 @@ impl EnhancedSpinner {
             status_messages: Vec::new(),
             current_index: Arc::new(Mutex::new(0)),
             running: Arc::new(Mutex::new(true)),
+            task: Arc::new(Mutex::new(None)),
         }
     }
 
@@ -32,12 +35,15 @@ impl EnhancedSpinner {
         let status_messages = self.status_messages.clone();
         let message = self.message.clone();
 
-        tokio::spawn(async move {
+        let task = tokio::spawn(async move {
             let mut interval = interval(Duration::from_millis(100));
 
-            while *running.lock().unwrap() {
-                let base_message = message.lock().unwrap().clone();
-                let index = *current_index.lock().unwrap();
+            while running.lock().map(|state| *state).unwrap_or(false) {
+                let base_message = message
+                    .lock()
+                    .map(|value| value.clone())
+                    .unwrap_or_default();
+                let index = current_index.lock().map(|value| *value).unwrap_or_default();
                 if status_messages.is_empty() {
                     println!("{} 🔄", base_message);
                 } else {
@@ -45,19 +51,33 @@ impl EnhancedSpinner {
                     println!("{} {} - {}", base_message, get_spinner_char(), status);
                 }
 
-                *current_index.lock().unwrap() = index + 1;
+                if let Ok(mut value) = current_index.lock() {
+                    *value = index + 1;
+                }
 
                 interval.tick().await;
             }
         });
+        if let Ok(mut handle) = self.task.lock() {
+            *handle = Some(task);
+        }
     }
 
     pub fn stop(&self) {
-        *self.running.lock().unwrap() = false;
+        if let Ok(mut running) = self.running.lock() {
+            *running = false;
+        }
+        if let Ok(mut task) = self.task.lock() {
+            if let Some(handle) = task.take() {
+                handle.abort();
+            }
+        }
     }
 
     pub fn update_message(&mut self, new_message: String) {
-        *self.message.lock().unwrap() = new_message;
+        if let Ok(mut message) = self.message.lock() {
+            *message = new_message;
+        }
     }
 }
 
