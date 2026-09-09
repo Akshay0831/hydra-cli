@@ -1,0 +1,14 @@
+[profile]
+name = "ai-dense"
+description = "AI-optimized machine-dense specification"
+
+[doc_rules]
+max_prose_paragraph_lines = 3
+require_tables_for_apis = true
+allow_narrative_tutorials = false
+enforce_cross_links = true
+max_comment_ratio = 0.20
+
+[loading_rules]
+auto_traverse_parents = true
+cache_strategy = "memory-hash-diff"

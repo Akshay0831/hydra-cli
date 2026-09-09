@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::RwLock;
 use walkdir::WalkDir;
 
-/// A code element that can be indexed and searched
+/// Code element for indexing and search
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CodeElement {
     pub id: String,
@@ -19,7 +19,7 @@ pub struct CodeElement {
     pub metadata: HashMap<String, String>,
 }
 
-/// Types of code elements that can be indexed
+/// Code element types for indexing
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ElementType {
     Function,
@@ -57,7 +57,7 @@ impl std::fmt::Display for ElementType {
     }
 }
 
-/// Configuration for code indexing
+/// Code indexing configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct IndexConfig {
     /// Paths to index (supports glob patterns)
@@ -99,7 +99,7 @@ impl Default for IndexConfig {
     }
 }
 
-/// The main code indexing engine
+/// Main code indexing engine
 pub struct CodeMatrix {
     index: RwLock<HashMap<String, CodeElement>>,
     pub config: IndexConfig,
@@ -113,7 +113,7 @@ struct PersistedIndex {
     elements: Vec<CodeElement>,
 }
 
-/// Trait for language-specific parsing
+/// Language-specific parsing trait
 pub trait LanguageParser: Send + Sync {
     fn supported_extensions(&self) -> Vec<&str>;
     fn parse_file(&self, file_path: &Path, content: &str) -> Result<Vec<CodeElement>>;
@@ -675,4 +675,313 @@ fn sort_elements(mut elements: Vec<CodeElement>) -> Vec<CodeElement> {
             .then_with(|| left.name.cmp(&right.name))
     });
     elements
+}
+
+// ---------------------------------------------------------------------------
+// Hierarchical Context Loader, Anti-Looping Hash Cache & AST Skeletonizer
+// ---------------------------------------------------------------------------
+
+/// Strategy used for extracting and loading context.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ContextStrategyKind {
+    /// Strips function bodies and internal logic; extracts signatures and doc invariants.
+    ASTSkeleton,
+    /// Multi-signal ranking based on distance, relevance, and references.
+    RelevanceScored,
+    /// Fast slice extraction bounded by line/token budget.
+    SliceWindow,
+    /// Ingests directory/crate documentation tables and rules.
+    DenseDoc,
+}
+
+impl Default for ContextStrategyKind {
+    fn default() -> Self {
+        Self::ASTSkeleton
+    }
+}
+
+/// Cached entry in memory to avoid repetitive reads.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CachedContextEntry {
+    pub path: PathBuf,
+    pub content_hash: String,
+    pub extracted_content: String,
+    pub token_estimate: usize,
+}
+
+/// Hierarchical context assembled for a given target file or directory.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct HierarchicalContext {
+    /// Relative or absolute target path requested
+    pub target: PathBuf,
+    /// Associated crate/module dense documentation (e.g. README.md in directory or parent)
+    pub documentation_invariants: Vec<String>,
+    /// Compact code skeleton extracted without full implementation bodies
+    pub code_skeleton: String,
+    /// Full paths of files traversed/included in this context bundle
+    pub source_paths: Vec<PathBuf>,
+    /// Total estimated tokens
+    pub estimated_tokens: usize,
+}
+
+/// In-memory cache and loader for hierarchical, token-thrifty context.
+#[derive(Debug, Clone, Default)]
+pub struct ContextLoader {
+    cache: std::sync::Arc<RwLock<HashMap<PathBuf, CachedContextEntry>>>,
+}
+
+impl ContextLoader {
+    pub fn new() -> Self {
+        Self {
+            cache: std::sync::Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
+    /// Fast non-cryptographic content hash for deduplication
+    pub fn hash_content(content: &str) -> String {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+        let mut hasher = DefaultHasher::new();
+        content.hash(&mut hasher);
+        format!("{:016x}", hasher.finish())
+    }
+
+    /// Generates a machine-dense AST skeleton for a source code string.
+    /// Retains pub structs, enums, traits, function signatures, and doc comments,
+    /// completely stripping out implementation bodies.
+    pub fn generate_skeleton(content: &str, language_ext: &str) -> String {
+        match language_ext {
+            "rs" => Self::skeletonize_rust(content),
+            "js" | "ts" | "jsx" | "tsx" => Self::skeletonize_ts_js(content),
+            _ => content.lines().take(20).collect::<Vec<_>>().join("\n"),
+        }
+    }
+
+    fn skeletonize_rust(content: &str) -> String {
+        let mut out = Vec::new();
+        let mut in_comment_block = false;
+
+        for line in content.lines() {
+            let trimmed = line.trim();
+
+            if trimmed.starts_with("/*") {
+                in_comment_block = true;
+            }
+            if in_comment_block {
+                if trimmed.contains("*/") {
+                    in_comment_block = false;
+                }
+                continue;
+            }
+
+            // Keep doc comments (/// and //!)
+            if trimmed.starts_with("///") || trimmed.starts_with("//!") {
+                out.push(line.to_string());
+                continue;
+            }
+
+            // Ignore standard filler comments
+            if trimmed.starts_with("//") {
+                continue;
+            }
+
+            // Keep attributes like #[derive(...)]
+            if trimmed.starts_with("#[") {
+                out.push(line.to_string());
+                continue;
+            }
+
+            // Declarations of structs, enums, traits, type aliases
+            if trimmed.starts_with("pub struct ")
+                || trimmed.starts_with("pub enum ")
+                || trimmed.starts_with("pub trait ")
+                || trimmed.starts_with("pub type ")
+                || trimmed.starts_with("struct ")
+                || trimmed.starts_with("enum ")
+                || trimmed.starts_with("trait ")
+            {
+                out.push(line.to_string());
+                continue;
+            }
+
+            // Function signatures: condense bodies
+            if trimmed.starts_with("pub fn ")
+                || trimmed.starts_with("pub async fn ")
+                || trimmed.starts_with("fn ")
+                || trimmed.starts_with("async fn ")
+            {
+                if let Some(pos) = line.find('{') {
+                    out.push(format!("{} {{ /* ... */ }}", &line[..pos].trim_end()));
+                } else if line.ends_with(';') {
+                    out.push(line.to_string());
+                } else {
+                    out.push(format!("{} {{ /* ... */ }}", line.trim_end()));
+                }
+                continue;
+            }
+
+            // Impl headers
+            if trimmed.starts_with("impl ") || trimmed.starts_with("pub impl ") {
+                out.push(line.to_string());
+                continue;
+            }
+
+            // Struct fields and enum variants
+            if trimmed.starts_with("pub ") && (trimmed.contains(':') || trimmed.contains(',')) {
+                out.push(line.to_string());
+                continue;
+            }
+
+            // Closing braces
+            if trimmed == "}" {
+                out.push(line.to_string());
+            }
+        }
+
+        out.join("\n")
+    }
+
+    fn skeletonize_ts_js(content: &str) -> String {
+        let mut out = Vec::new();
+        for line in content.lines() {
+            let trimmed = line.trim();
+            if trimmed.starts_with("//") {
+                continue;
+            }
+            if trimmed.starts_with("export interface ")
+                || trimmed.starts_with("export type ")
+                || trimmed.starts_with("export class ")
+                || trimmed.starts_with("interface ")
+                || trimmed.starts_with("class ")
+            {
+                out.push(line.to_string());
+                continue;
+            }
+            if trimmed.starts_with("export function ")
+                || trimmed.starts_with("export async function ")
+                || trimmed.starts_with("function ")
+                || trimmed.starts_with("async function ")
+            {
+                if let Some(pos) = line.find('{') {
+                    out.push(format!("{} {{ /* ... */ }}", &line[..pos].trim_end()));
+                } else {
+                    out.push(format!("{} {{ /* ... */ }}", line.trim_end()));
+                }
+                continue;
+            }
+            if trimmed == "}" {
+                out.push(line.to_string());
+            }
+        }
+        out.join("\n")
+    }
+
+    /// Crawls parent directories upward to locate README.md or ROADMAP.md files.
+    pub async fn locate_hierarchical_docs(start_path: &Path, root_limit: &Path) -> Vec<PathBuf> {
+        let mut docs = Vec::new();
+        let mut curr = if start_path.is_file() {
+            start_path.parent().map(Path::to_path_buf)
+        } else {
+            Some(start_path.to_path_buf())
+        };
+
+        while let Some(dir) = curr {
+            let readme = dir.join("README.md");
+            if readme.is_file() && !docs.contains(&readme) {
+                docs.push(readme);
+            }
+            let roadmap = dir.join("ROADMAP.md");
+            if roadmap.is_file() && !docs.contains(&roadmap) {
+                docs.push(roadmap);
+            }
+
+            if dir == root_limit || dir.parent().is_none() {
+                break;
+            }
+            curr = dir.parent().map(Path::to_path_buf);
+        }
+
+        docs
+    }
+
+    /// Loads the hierarchical context for a target file or module, using caching
+    /// to avoid re-reading identical files.
+    pub async fn load_context(
+        &self,
+        target_path: &Path,
+        root_dir: &Path,
+        strategy: ContextStrategyKind,
+    ) -> Result<HierarchicalContext> {
+        let mut result = HierarchicalContext {
+            target: target_path.to_path_buf(),
+            ..Default::default()
+        };
+
+        // 1. Hierarchical docs lookup
+        let doc_paths = Self::locate_hierarchical_docs(target_path, root_dir).await;
+        for doc_path in doc_paths {
+            if let Ok(content) = tokio::fs::read_to_string(&doc_path).await {
+                result.source_paths.push(doc_path.clone());
+                let snippet = match strategy {
+                    ContextStrategyKind::DenseDoc | ContextStrategyKind::ASTSkeleton => {
+                        let lines: Vec<&str> = content
+                            .lines()
+                            .filter(|l| {
+                                let t = l.trim();
+                                t.starts_with('#')
+                                    || t.starts_with('|')
+                                    || t.starts_with('-')
+                                    || t.starts_with('*')
+                            })
+                            .take(40)
+                            .collect();
+                        lines.join("\n")
+                    }
+                    _ => content.lines().take(40).collect::<Vec<_>>().join("\n"),
+                };
+                result.documentation_invariants.push(snippet);
+            }
+        }
+
+        // 2. Code skeleton or content with memory caching
+        if target_path.is_file() {
+            result.source_paths.push(target_path.to_path_buf());
+            let file_str = tokio::fs::read_to_string(target_path).await.unwrap_or_default();
+            let current_hash = Self::hash_content(&file_str);
+
+            let mut cache = self.cache.write().await;
+            if let Some(entry) = cache.get(target_path) {
+                if entry.content_hash == current_hash {
+                    result.code_skeleton = entry.extracted_content.clone();
+                    result.estimated_tokens = entry.token_estimate;
+                    return Ok(result);
+                }
+            }
+
+            let ext = target_path
+                .extension()
+                .and_then(|s| s.to_str())
+                .unwrap_or("");
+            let skeleton = match strategy {
+                ContextStrategyKind::ASTSkeleton => Self::generate_skeleton(&file_str, ext),
+                _ => file_str.lines().take(50).collect::<Vec<_>>().join("\n"),
+            };
+
+            let est_tokens = skeleton.len() / 4;
+            cache.insert(
+                target_path.to_path_buf(),
+                CachedContextEntry {
+                    path: target_path.to_path_buf(),
+                    content_hash: current_hash,
+                    extracted_content: skeleton.clone(),
+                    token_estimate: est_tokens,
+                },
+            );
+
+            result.code_skeleton = skeleton;
+            result.estimated_tokens = est_tokens;
+        }
+
+        Ok(result)
+    }
 }

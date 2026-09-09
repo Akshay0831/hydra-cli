@@ -1,8 +1,4 @@
-//! Router for prompt execution with retry and failover.
-//!
-//! This service encapsulates all routing, provider selection, retry logic,
-//! and progress feedback for prompt commands. It is the only point where
-//! provider retry decisions are made.
+//! Prompt router with retry logic and failover handling.
 
 use crate::agent_adapter::{AgentAdapter, PromptRequest};
 use crate::error::{ErrorHandler, HydraCliError};
@@ -10,7 +6,105 @@ use crate::provider_adapter::ProviderAdapterFactory;
 use crate::retry_manager::RetryManager;
 use crate::routing::{RoutingConfig, RoutingRequest};
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
+use std::path::Path;
 use std::sync::Arc;
+
+    /// Project goal and architectural invariant registry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProjectGoalRegistry {
+    pub project_name: String,
+    pub primary_goals: Vec<String>,
+    pub invariants: Vec<String>,
+    pub forbidden_patterns: Vec<String>,
+}
+
+impl Default for ProjectGoalRegistry {
+    fn default() -> Self {
+        Self {
+            project_name: "hydra".to_string(),
+            primary_goals: vec![
+                "High performance single binary autonomous coding orchestrator".to_string(),
+                "Token-efficient execution with AST skeletons and zero repetitive reads".to_string(),
+            ],
+            invariants: vec![
+                "All external dependencies interact through Hydra adapter facades".to_string(),
+                "Zero panic/unwrap shortcuts in non-test code".to_string(),
+                "Hierarchical documentation tree must maintain 100% valid cross-links".to_string(),
+            ],
+            forbidden_patterns: vec![
+                "Ad-hoc *_runner.rs or *_utils.rs wrapper files".to_string(),
+                "Unapproved Cargo.toml/package.json dependency additions".to_string(),
+            ],
+        }
+    }
+}
+
+impl ProjectGoalRegistry {
+    /// Load from .hydra/goals.json or use defaults.
+    pub async fn load_or_default(workspace_root: &Path) -> Self {
+        let goals_path = workspace_root.join(".hydra").join("goals.json");
+        if let Ok(content) = tokio::fs::read_to_string(&goals_path).await {
+            if let Ok(registry) = serde_json::from_str(&content) {
+                return registry;
+            }
+        }
+        Self::default()
+    }
+
+    /// Format goals and invariants for prompt injection.
+    pub fn format_invariant_header(&self) -> String {
+        let mut out = Vec::new();
+        out.push(format!("### ARCHITECTURAL INVARIANTS [{}]", self.project_name));
+        for inv in &self.invariants {
+            out.push(format!("- INVARIANT: {inv}"));
+        }
+        for forbid in &self.forbidden_patterns {
+            out.push(format!("- FORBIDDEN: {forbid}"));
+        }
+        out.join("\n")
+    }
+}
+
+/// Universal KV-cache prefix aligner (Phase 3.5).
+/// Enforces deterministic prompt ordering to maximize provider prompt caching hit rate.
+pub struct PromptPrefixAligner;
+
+impl PromptPrefixAligner {
+    /// Assemble prompts: system -> invariants -> docs -> AST -> user intent.
+    pub fn build_cache_aligned_prompt(
+        system_persona: &str,
+        invariants: &str,
+        doc_invariants: &[String],
+        ast_skeleton: &str,
+        user_intent: &str,
+    ) -> String {
+        let mut sections = Vec::new();
+
+        // 1. Static system persona (longest lived)
+        sections.push(system_persona.to_string());
+
+        // 2. Static macro invariants & goals
+        if !invariants.is_empty() {
+            sections.push(invariants.to_string());
+        }
+
+        // 3. Hierarchical documentation tables
+        if !doc_invariants.is_empty() {
+            sections.push(format!("### REPOSITORY CONTRACTS\n{}", doc_invariants.join("\n\n")));
+        }
+
+        // 4. Code AST Skeletons
+        if !ast_skeleton.is_empty() {
+            sections.push(format!("### CODE CONTEXT SKELETON\n{}", ast_skeleton));
+        }
+
+        // 5. Active User Intent (dynamic payload at tail)
+        sections.push(format!("### TASK INTENT\n{}", user_intent));
+
+        sections.join("\n\n")
+    }
+}
 
 #[async_trait::async_trait]
 pub trait PromptExecutor: Send + Sync {
@@ -274,5 +368,37 @@ mod tests {
         assert_eq!(requests[0].provider.as_deref(), Some("test"));
         assert_eq!(requests[0].model.as_deref(), Some("model"));
         assert_eq!(requests[0].api_key.as_deref(), Some("secret"));
+    }
+
+    #[test]
+    fn test_project_goal_registry_formats_invariants() {
+        let registry = ProjectGoalRegistry::default();
+        let header = registry.format_invariant_header();
+        assert!(header.contains("ARCHITECTURAL INVARIANTS"));
+        assert!(header.contains("INVARIANT: All external dependencies"));
+        assert!(header.contains("FORBIDDEN: Ad-hoc *_runner.rs"));
+    }
+
+    #[test]
+    fn test_prompt_prefix_aligner_order() {
+        let aligned = PromptPrefixAligner::build_cache_aligned_prompt(
+            "SYSTEM: coder",
+            "INVARIANT: zero unsafe",
+            &["| API | Desc |".to_string()],
+            "pub struct Model;",
+            "Implement feature X",
+        );
+
+        let system_pos = aligned.find("SYSTEM: coder").unwrap();
+        let inv_pos = aligned.find("INVARIANT: zero unsafe").unwrap();
+        let doc_pos = aligned.find("REPOSITORY CONTRACTS").unwrap();
+        let code_pos = aligned.find("CODE CONTEXT SKELETON").unwrap();
+        let intent_pos = aligned.find("TASK INTENT").unwrap();
+
+        // Must follow static -> dynamic KV cache order
+        assert!(system_pos < inv_pos);
+        assert!(inv_pos < doc_pos);
+        assert!(doc_pos < code_pos);
+        assert!(code_pos < intent_pos);
     }
 }

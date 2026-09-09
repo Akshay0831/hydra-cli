@@ -78,32 +78,36 @@ hydra-cli tools                                                      # List buil
 
 ---
 
-## Architecture & Dependency Plan
+## Architecture & Hierarchical Navigation Hub
 
-Hydra enforces the **Adapter Facade Pattern** (Pattern B) across all subsystems:
+Hydra is organized as a modular, traceable workspace. Each subsystem maintains its own machine-dense documentation linked from this root hub:
+
+| Component | Documentation | Role |
+|---|---|---|
+| **Core Roadmap** | [ROADMAP.md](ROADMAP.md) | High-performance headless backend roadmap & phases |
+| **CLI & Swarm** | [crates/hydra-cli/README.md](crates/hydra-cli/README.md) | CLI commands, multi-agent swarm orchestrator, and facade adapters |
+| **AST Matrix** | [crates/hydra-matrix/README.md](crates/hydra-matrix/README.md) | AST indexing, context loader, and skeletonization engine |
+| **Task DAG** | [crates/hydra-dag/README.md](crates/hydra-dag/README.md) | Concurrent DAG execution and dependency graph engine |
+| **Sandbox** | [crates/hydra-sandbox/README.md](crates/hydra-sandbox/README.md) | QuickJS isolated evaluation sandbox |
+| **Submodules** | [submodules/README.md](submodules/README.md) | Pinned upstream submodules registry & adapter seams |
 
 ```text
 hydra-cli
-├── adapters/
-│   ├── pi_agent.rs   <-> submodules/pi_agent_rust (pinned upstream runtime)
-│   ├── litellm.rs    <-> submodules/litellm       (daemon process supervisor)
-│   └── mcp.rs        <-> submodules/mcp-sdk       (MCP protocol & tool connector)
-├── partitioner/
-│   └── ast_splitter.rs (AST dependency clustering via hydra-matrix)
-├── orchestrator/
-│   └── swarm.rs        (parallel worker trios in isolated Git worktrees)
-├── consolidator/
-│   └── merger.rs       (log deduplication & diff patch reconciliation)
-└── crates/
-    ├── hydra-dag       (DAG task scheduling engine)
-    ├── hydra-matrix    (tree-sitter AST indexing & dependency search)
-    └── hydra-sandbox   (sandboxed JavaScript execution)
+├── README.md                   ← Navigation Hub
+├── ROADMAP.md                  ← Global Architecture & Phase Milestones
+├── docs/profiles/ai-dense.toml ← Default Machine-Dense Doc Specification
+├── crates/
+│   ├── hydra-cli/README.md     ← Swarm, adapters, and CLI commands
+│   ├── hydra-matrix/README.md  ← ContextLoader, AST skeletonizer, symbol index
+│   ├── hydra-dag/README.md     ← Topological DAG scheduler
+│   └── hydra-sandbox/README.md ← Sandboxed JS engine
+└── submodules/README.md        ← pi_agent_rust, litellm, mcp-sdk
 ```
 
-### Dependency Rules
+### Dependency & Architectural Invariants
 * **Adapter Seam**: Application code interacts exclusively with Hydra adapter facades (`crates/hydra-cli/src/adapters/`). Direct upstream SDK imports are forbidden.
 * **Submodules Intact**: External submodules (`pi_agent_rust`, `litellm`, `mcp-sdk`) remain 100% clean and untouched; custom logic and role steering reside in Hydra adapters.
-* **Release Gates**: Every dependency change requires running `cargo check --workspace`, `cargo test --workspace`, and verifying clean submodule trees.
+* **Doc Integrity Enforcement**: Run `hydra-cli doc check` to validate internal cross-links and ensure documentation invariants are maintained.
 
 ---
 

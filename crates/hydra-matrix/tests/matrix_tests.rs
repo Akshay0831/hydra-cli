@@ -5,7 +5,7 @@ mod matrix_tests {
     use std::path::PathBuf;
     use tempfile::TempDir;
 
-    // Helper function to create test files
+    // Create test files
     async fn create_test_files(temp_dir: &TempDir) -> Vec<PathBuf> {
         let test_files = vec![
             (
@@ -325,4 +325,54 @@ export function exampleTypeScriptFunction(data: TypeScriptInterface): string {
         assert!(element.id.contains("1")); // Line number
         assert!(element.id.contains("test_function")); // Function name
     }
+
+    #[tokio::test]
+    async fn test_context_loader_and_skeletonization() {
+        use hydra_matrix::{ContextLoader, ContextStrategyKind};
+        use std::io::Write;
+
+        let temp_dir = TempDir::new().unwrap();
+        let crate_dir = temp_dir.path().join("my_crate");
+        std::fs::create_dir_all(&crate_dir).unwrap();
+
+        // Create crate README.md
+        let readme_path = crate_dir.join("README.md");
+        {
+            let mut f = std::fs::File::create(&readme_path).unwrap();
+            writeln!(f, "# My Crate\n| API | Description |\n|---|---|\n| run | Runs task |").unwrap();
+        }
+
+        // Create Rust source file
+        let src_file = crate_dir.join("lib.rs");
+        {
+            let mut f = std::fs::File::create(&src_file).unwrap();
+            writeln!(
+                f,
+                "/// Public entry point\npub struct Worker {{\n    pub id: u32,\n}}\n\nimpl Worker {{\n    pub fn run(&self) -> bool {{\n        println!(\"heavy inner computation\");\n        true\n    }}\n}}"
+            ).unwrap();
+        }
+
+        let loader = ContextLoader::new();
+        let ctx = loader
+            .load_context(&src_file, temp_dir.path(), ContextStrategyKind::ASTSkeleton)
+            .await
+            .unwrap();
+
+        // Check doc invariant extraction
+        assert!(!ctx.documentation_invariants.is_empty());
+        assert!(ctx.documentation_invariants[0].contains("| API | Description |"));
+
+        // Check skeletonization: struct and fn signature preserved, internal body stripped
+        assert!(ctx.code_skeleton.contains("pub struct Worker"));
+        assert!(ctx.code_skeleton.contains("pub fn run(&self) -> bool { /* ... */ }"));
+        assert!(!ctx.code_skeleton.contains("heavy inner computation"));
+
+        // Check anti-looping memory cache
+        let ctx_cached = loader
+            .load_context(&src_file, temp_dir.path(), ContextStrategyKind::ASTSkeleton)
+            .await
+            .unwrap();
+        assert_eq!(ctx.code_skeleton, ctx_cached.code_skeleton);
+    }
 }
+

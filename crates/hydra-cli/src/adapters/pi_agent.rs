@@ -54,6 +54,41 @@ impl ScopeConstraint {
             .iter()
             .any(|allowed| target_path.starts_with(allowed) || target_path == allowed)
     }
+
+    /// Blocks spurious wrapper files; forces module extension.
+    pub fn validate_file_creation(&self, proposed_path: &Path) -> Result<(), String> {
+        let file_name = proposed_path
+            .file_name()
+            .and_then(|f| f.to_str())
+            .unwrap_or("")
+            .to_lowercase();
+
+        // Common weak-model duplicate wrapper names
+        let forbidden_names = [
+            "utils.rs",
+            "util.rs",
+            "helpers.rs",
+            "helper.rs",
+            "common.rs",
+            "new_utils.rs",
+            "utils.py",
+            "helpers.py",
+            "util.ts",
+            "utils.ts",
+            "helpers.ts",
+        ];
+
+        for forbidden in &forbidden_names {
+            if file_name == *forbidden || file_name.ends_with("_utils.rs") || file_name.ends_with("_helper.rs") {
+                return Err(format!(
+                    "REJECTED: File creation '{}' blocked by anti-duplication policy. Extend existing module contracts instead of creating generic wrapper files.",
+                    proposed_path.display()
+                ));
+            }
+        }
+
+        Ok(())
+    }
 }
 
 /// Execution outcome of an agent turn.
@@ -273,6 +308,15 @@ mod tests {
 
         let rev_p = AgentAdapter::format_role_prompt(AgentRole::Reviewer, None);
         assert!(rev_p.contains("REVIEWER"));
+    }
+
+    #[test]
+    fn test_anti_duplication_blocks_generic_helpers() {
+        let scope = ScopeConstraint::default();
+        assert!(scope.validate_file_creation(&PathBuf::from("src/utils.rs")).is_err());
+        assert!(scope.validate_file_creation(&PathBuf::from("src/my_helper.rs")).is_err());
+        assert!(scope.validate_file_creation(&PathBuf::from("src/module_utils.rs")).is_err());
+        assert!(scope.validate_file_creation(&PathBuf::from("src/ast_parser.rs")).is_ok());
     }
 }
 

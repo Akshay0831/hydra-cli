@@ -107,6 +107,96 @@ impl Consolidator {
 
         test_passed && review_approved && !has_blocking_errors
     }
+
+    /// Filters out conversational comments and code logic restatements.
+    pub fn filter_comment_density(patch_diff: &str, max_comment_ratio: f64) -> Result<String, String> {
+        let mut code_lines = 0usize;
+        let mut comment_lines = 0usize;
+        let mut filtered_lines = Vec::new();
+
+        for line in patch_diff.lines() {
+            let trimmed = line.trim_start();
+            // Check additions in unified diff format (+...)
+            if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
+                let content = trimmed[1..].trim();
+                if content.starts_with("//") || content.starts_with("/*") || content.starts_with('*') {
+                    // Check for obvious conversational narrative filler
+                    let lower = content.to_lowercase();
+                    if lower.contains("now let's")
+                        || lower.contains("here we are")
+                        || lower.contains("in this section")
+                        || lower.contains("as requested")
+                        || lower.contains("step 1:")
+                        || lower.contains("step 2:")
+                        || lower.contains("first we need to")
+                    {
+                        // Drop storytelling line
+                        continue;
+                    }
+                    comment_lines += 1;
+                } else if !content.is_empty() {
+                    code_lines += 1;
+                }
+            }
+            filtered_lines.push(line);
+        }
+
+        let total = code_lines + comment_lines;
+        if total > 10 && (comment_lines as f64 / total as f64) > max_comment_ratio {
+            return Err(format!(
+                "REJECTED: Patch exceeds max comment ratio ({:.1}% > {:.1}%). Remove verbose conversational comments.",
+                (comment_lines as f64 / total as f64) * 100.0,
+                max_comment_ratio * 100.0
+            ));
+        }
+
+        Ok(filtered_lines.join("\n"))
+    }
+
+    /// Validates patch structure: blocks wrapper files, forbidden idioms, and dependency modifications.
+    pub fn validate_patch_invariants(patch_diff: &str) -> Result<(), String> {
+        for line in patch_diff.lines() {
+            let trimmed = line.trim();
+
+            // Phase 1.4: Dependency Import Lock Gate
+            if (trimmed.starts_with("--- a/") || trimmed.starts_with("+++ b/"))
+                && (trimmed.contains("Cargo.toml") || trimmed.contains("package.json") || trimmed.contains("requirements.txt"))
+            {
+                return Err(format!(
+                    "REJECTED: Dependency file modification detected in patch: '{}'. Dependency changes require explicit operator approval.",
+                    trimmed
+                ));
+            }
+
+            // Phase 1.2: Single Execution Gateway Enforcer (block new runner/wrapper files)
+            if trimmed.starts_with("+++ b/") {
+                let target = &trimmed[6..];
+                if target.ends_with("_runner.rs") || target.ends_with("_helper.rs") || target.ends_with("_utils.rs") {
+                    return Err(format!(
+                        "REJECTED: Ad-hoc wrapper file '{}' blocked. Route all changes through established Hydra adapter facades.",
+                        target
+                    ));
+                }
+            }
+
+            // Phase 1.3: AST-Level Redundancy & Idiom Scanner
+            if trimmed.starts_with('+') && !trimmed.starts_with("+++") {
+                let added = trimmed[1..].trim();
+                // Block silent regression shortcuts (forbidden unwrap/panic in library code)
+                if (added.contains(".unwrap()") || added.contains("panic!("))
+                    && !patch_diff.contains("/tests/")
+                    && !patch_diff.contains("#[cfg(test)]")
+                {
+                    return Err(format!(
+                        "REJECTED: Forbidden panic/unwrap idiom in non-test patch addition: '{}'. Use proper Result error handling.",
+                        added
+                    ));
+                }
+            }
+        }
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -149,6 +239,44 @@ mod tests {
             line: None,
         }];
         assert!(!Consolidator::evaluate_consensus(true, true, &blocking));
+    }
+
+    #[test]
+    fn test_filter_comment_density_rejects_narrative_filler() {
+        let diff_with_filler = r#"
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -1,3 +1,6 @@
++// Now let's implement the helper function as requested
++// Step 1: Initialize the counter
++// Here we are setting up the state
++pub fn count() -> usize { 42 }
+"#;
+        let filtered = Consolidator::filter_comment_density(diff_with_filler, 0.50).unwrap();
+        assert!(!filtered.contains("Now let's implement"));
+        assert!(!filtered.contains("Step 1:"));
+        assert!(filtered.contains("pub fn count() -> usize { 42 }"));
+    }
+
+    #[test]
+    fn test_validate_patch_invariants_blocks_dependency_modifications() {
+        let dep_diff = "--- a/Cargo.toml\n+++ b/Cargo.toml\n+rand = \"0.8\"\n";
+        assert!(Consolidator::validate_patch_invariants(dep_diff).is_err());
+    }
+
+    #[test]
+    fn test_validate_patch_invariants_blocks_spurious_wrappers() {
+        let wrapper_diff = "+++ b/src/my_runner.rs\n+pub fn run() {}\n";
+        assert!(Consolidator::validate_patch_invariants(wrapper_diff).is_err());
+    }
+
+    #[test]
+    fn test_validate_patch_invariants_blocks_unwrap_in_library_code() {
+        let bad_diff = "+++ b/src/core.rs\n+let x = res.unwrap();\n";
+        assert!(Consolidator::validate_patch_invariants(bad_diff).is_err());
+
+        let test_diff = "+++ b/tests/integration.rs\n+let x = res.unwrap();\n";
+        assert!(Consolidator::validate_patch_invariants(test_diff).is_ok());
     }
 }
 
