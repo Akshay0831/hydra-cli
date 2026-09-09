@@ -7,7 +7,7 @@ Cargo.lock
 **/*.dylib
 **/*.dll
 **/*.exe
-.github
+.*
 
 # IDE & Editor
 .vscode/
@@ -140,7 +140,8 @@ perf.data.old
 target/doc/
 docs/generated/
 
-# CI/CD Logs (if running locally)
+# CI/CD
+!.github/workflows/
 .github/workflows/*.log
 
 # Session/State Files
