@@ -1,6 +1,10 @@
-mod agent_adapter;
+pub mod adapters;
+pub mod agent_adapter;
 mod commands;
+pub mod consolidator;
 mod error;
+pub mod orchestrator;
+pub mod partitioner;
 mod progress;
 mod prompt_router;
 mod provider_adapter;

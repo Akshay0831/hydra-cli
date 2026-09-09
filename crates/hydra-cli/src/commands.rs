@@ -176,6 +176,19 @@ pub enum CommandHandler {
     },
     /// List tools available to the upstream agent.
     Tools,
+    /// Execute an autonomous parallel multi-agent swarm across workspace partitions.
+    Swarm {
+        #[arg(value_name = "INTENT")]
+        intent: String,
+        #[arg(long, default_value = ".")]
+        root: std::path::PathBuf,
+        #[arg(long, default_value_t = 4)]
+        concurrency: usize,
+        #[arg(long, default_value = "gemini-2.5-pro")]
+        coder_model: String,
+        #[arg(long, default_value = "claude-3-5-sonnet")]
+        reviewer_model: String,
+    },
 }
 
 impl CommandHandler {
@@ -275,6 +288,23 @@ impl CommandHandler {
                 .await
             }
             CommandHandler::Tools => self.tools(feedback).await,
+            CommandHandler::Swarm {
+                intent,
+                root,
+                concurrency,
+                coder_model,
+                reviewer_model,
+            } => {
+                self.swarm(
+                    intent,
+                    root,
+                    *concurrency,
+                    coder_model,
+                    reviewer_model,
+                    feedback,
+                )
+                .await
+            }
         }
     }
 
@@ -845,6 +875,101 @@ impl CommandHandler {
         for name in AgentAdapter::builtin_tool_names() {
             println!("{name}");
         }
+        Ok(())
+    }
+
+    async fn swarm(
+        &self,
+        intent: &str,
+        root: &Path,
+        concurrency: usize,
+        coder_model: &str,
+        reviewer_model: &str,
+        feedback: &mut CliFeedback,
+    ) -> Result<(), HydraCliError> {
+        feedback.info_message(format!("Initiating Hydra Swarm for intent: \"{intent}\""));
+        feedback.start_spinner("Partitioning workspace AST dependencies...".to_string());
+
+        let partitioner = crate::partitioner::AstSplitter::from_workspace(root)
+            .map_err(|e| HydraCliError::TaskExecution(anyhow::anyhow!("Failed to initialize AST partitioner: {e}")))?;
+
+        // Find candidate project files to partition
+        let mut target_files = Vec::new();
+        let src_dir = root.join("src");
+        if src_dir.exists() {
+            if let Ok(entries) = std::fs::read_dir(&src_dir) {
+                for entry in entries.flatten() {
+                    let p = entry.path();
+                    if p.extension().map(|e| e == "rs" || e == "js" || e == "ts").unwrap_or(false) {
+                        target_files.push(p);
+                    }
+                }
+            }
+        }
+        if target_files.is_empty() {
+            target_files.push(root.join("src/lib.rs"));
+        }
+
+        let partitions = partitioner.partition_workspace(&target_files, concurrency).await
+            .map_err(|e| HydraCliError::TaskExecution(anyhow::anyhow!("AST Partitioning failed: {e}")))?;
+
+        feedback.update_spinner(format!("Spawned {} workspace partitions", partitions.len()));
+
+        let config = crate::orchestrator::SwarmConfig {
+            max_concurrency: concurrency,
+            coder_model: coder_model.to_string(),
+            reviewer_model: reviewer_model.to_string(),
+        };
+
+        let orchestrator = crate::orchestrator::SwarmOrchestrator::new(config, None);
+        let (tx, mut rx) = tokio::sync::mpsc::channel(128);
+
+        // Process swarm events
+        let feedback_printer = tokio::spawn(async move {
+            while let Some(event) = rx.recv().await {
+                match event {
+                    crate::orchestrator::SwarmEvent::WorkerTurnStarted { partition_id, role } => {
+                        println!("  [{partition_id}] Worker {role} started turn");
+                    }
+                    crate::orchestrator::SwarmEvent::DiffReady { partition_id, diff } => {
+                        println!("  [{partition_id}] Diff generated ({} bytes)", diff.len());
+                    }
+                    crate::orchestrator::SwarmEvent::TestCompleted { partition_id, passed, .. } => {
+                        println!("  [{partition_id}] Test execution passed: {passed}");
+                    }
+                    crate::orchestrator::SwarmEvent::ReviewCompleted { partition_id, approved, .. } => {
+                        println!("  [{partition_id}] Audit review approved: {approved}");
+                    }
+                    crate::orchestrator::SwarmEvent::ConsensusReached { partition_id } => {
+                        println!("  [{partition_id}] Unanimous consensus reached!");
+                    }
+                    crate::orchestrator::SwarmEvent::PartitionFailed { partition_id, error } => {
+                        eprintln!("  [{partition_id}] FAILED: {error}");
+                    }
+                    _ => {}
+                }
+            }
+        });
+
+        let results = orchestrator.run_swarm(root, intent, partitions, tx).await
+            .map_err(|e| HydraCliError::TaskExecution(anyhow::anyhow!("Swarm execution failed: {e}")))?;
+
+        let _ = feedback_printer.await;
+        feedback.stop_spinner();
+
+        let diffs: Vec<String> = results.into_iter().map(|(_, d)| d).collect();
+        let unified_patch = crate::consolidator::Consolidator::reconcile_diffs(&diffs)
+            .map_err(|e| HydraCliError::TaskExecution(anyhow::anyhow!("Diff consolidation failed: {e}")))?;
+
+        if unified_patch.is_empty() {
+            feedback.info_message("Swarm completed with no modifications required.".to_string());
+        } else {
+            feedback.success_message(format!(
+                "Swarm achieved consensus! Generated unified patch ({} lines)",
+                unified_patch.lines().count()
+            ));
+        }
+
         Ok(())
     }
 }

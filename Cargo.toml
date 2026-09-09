@@ -1,6 +1,6 @@
-﻿[workspace]
+[workspace]
 resolver = "2"
-exclude = ["core/pi_agent"]
+exclude = ["submodules/pi_agent_rust", "submodules/litellm", "submodules/mcp-sdk"]
 members = [
     "crates/hydra-matrix",
     "crates/hydra-sandbox",

@@ -1,4 +1,4 @@
-﻿[package]
+[package]
 name = "hydra-cli"
 version = "0.1.0"
 edition = "2021"
@@ -8,7 +8,7 @@ readme = "../../README.md"
 repository = "https://github.com/Akshay0831/hydra-cli"
 
 [dependencies]
-pi = { package = "pi_agent_rust", version = "0.2.0", path = "../../core/pi_agent" }
+pi = { package = "pi_agent_rust", version = "0.2.0", path = "../../submodules/pi_agent_rust" }
 hydra-matrix = { version = "0.1.0", path = "../hydra-matrix" }
 hydra-sandbox = { version = "0.1.0", path = "../hydra-sandbox" }
 hydra-dag = { version = "0.1.0", path = "../hydra-dag" }

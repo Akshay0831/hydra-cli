@@ -124,8 +124,11 @@ impl PromptRouter {
                         PromptRequest {
                             message: message.clone(),
                             tools: enabled_tools.clone(),
+                            role: None,
+                            scope: None,
                             provider: Some(adapter.provider().to_string()),
                             model: Some(adapter.model().to_string()),
+                            model_alias: None,
                             api_key: Some(adapter.api_key().to_string()),
                             working_directory: working_directory.clone(),
                         },

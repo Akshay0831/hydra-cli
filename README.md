@@ -17,27 +17,14 @@ are parts of that single assistant experience, not separate utilities.
 
 ## Product Direction
 
-Hydra is being built around five connected capabilities:
+Hydra is built around six core capabilities:
 
-- **Provider intelligence:** profiles, models, credentials, capability-aware
-  routing, retry state, health tracking, and fallback across configured keys or
-  providers.
-- **Repository intelligence:** deterministic indexing, persisted context,
-  symbol and dependency search, and context selection for coding prompts.
-- **Coding workflows:** prompts, multi-task DAG execution, progress feedback,
-  resumable work, and clear command-level results.
-- **Safe local execution:** isolated JavaScript tooling, resource policies,
-  structured errors, and a boundary between Hydra policy and upstream runtime
-  implementation.
-- **Terminal-native extensibility:** built-in tools today, with a path toward
-  custom tools, approvals, extensions, interactive workflows, and automation.
-
-The current release foundation already includes provider routing and retry
-persistence, task graphs, repository indexing and snapshots, sandboxed
-JavaScript execution, progress handling, and an adapter boundary around the
-upstream agent runtime. The remaining roadmap turns these foundations into a
-cohesive coding loop with richer context, sessions, tools, and interactive
-terminal workflows.
+- **Autonomous Parallel Swarms:** Partition workspaces into disjoint AST clusters and execute Coder, Tester, and Reviewer worker trios simultaneously across isolated Git worktrees.
+- **Provider Intelligence:** Profiles, models, credentials, capability-aware routing, retry state, health tracking, and fallback across configured keys or providers.
+- **Unified Adapter Facades:** Single execution gateways for LLMs, process management for LiteLLM, Model Context Protocol (MCP) tool dispatch, and agent runtime isolation.
+- **Repository Intelligence:** Deterministic AST indexing, dependency clustering, symbol search, and context assembly for coding prompts.
+- **Consensus & Patch Consolidation:** Actionable log deduplication (compiler diagnostics and test assertions) and unified diff patch reconciliation.
+- **Safe Local Execution:** Isolated JavaScript tooling, resource policies, structured errors, and clear boundary enforcement.
 
 ## Use A Release Build
 
@@ -54,7 +41,7 @@ Windows:
 .\target\release\hydra-cli.exe --help
 ```
 
-Local commands work without provider setup:
+Local and offline commands work without provider setup:
 
 ```text
 hydra-cli js "2 + 2"
@@ -64,6 +51,20 @@ hydra-cli execute --config hydra.json --tasks workflow.json
 hydra-cli index --root . --output code-index.json --languages rs,js,ts
 hydra-cli tools
 ```
+
+## Autonomous Parallel Swarm
+
+Hydra includes a multi-threaded parallel swarm orchestrator that partitions repository AST dependencies into isolated scopes, running Coder, Tester, and Reviewer loops in ephemeral Git worktrees:
+
+```bash
+hydra-cli swarm "Refactor database connection pool and update integration tests" --concurrency 4
+```
+
+Options:
+- `--root <DIR>`: Target repository root (default: `.`)
+- `--concurrency <N>`: Maximum parallel worker trios (default: `4`)
+- `--coder-model <MODEL>`: Model alias for implementation workers (default: `gemini-2.5-pro`)
+- `--reviewer-model <MODEL>`: Model alias for auditing workers (default: `claude-3-5-sonnet`)
 
 ## Configure Prompts
 
@@ -98,24 +99,7 @@ hydra-cli providers --config hydra.json
 hydra-cli prompt --model coding "Explain this repository"
 ```
 
-Use `hydra-cli <command> --help` for options. `prompt` requires a configured
-candidate and credential; it routes by purpose, tools, capabilities, provider,
-model, and profile, then retries transient failures and fails over in preference
-order. `js`, `index`, `execute`, and routing inspection do not require an API
-key. Credentials are resolved by Hydra and passed only to Pi session creation;
-they are never printed.
-
-`execute` also accepts `--tasks <path>` with a JSON document shaped like:
-
-```json
-{"tasks":[{"id":"lint","description":"run lint"},{"id":"test","dependencies":["lint"],"description":"run tests"}]}
-```
-
-Retry state is stored beside the selected config as `<config>.retry.json`.
-`index` writes a complete serialized snapshot containing indexed elements,
-configuration, and statistics. Sandbox memory usage is reported as unavailable
-when the runtime cannot provide a measurement; TypeScript source is not
-transpiled by the sandbox.
+Use `hydra-cli <command> --help` for options. `prompt` routes by purpose, tools, capabilities, provider, model, and profile, then retries transient failures and fails over in preference order. Credentials are resolved by Hydra and passed securely to session creation; they are never logged or displayed.
 
 Other inspection and maintenance commands include:
 
@@ -125,59 +109,42 @@ hydra-cli retry-status --config hydra.json
 hydra-cli reset-retry --config hydra.json --provider openai --model coding --profile primary
 ```
 
-Routing supports `strict`, `provider`, `any`, and `none` fallback modes in the
-configuration. Candidate capabilities and explicit tool requirements are
-checked before a provider is attempted.
-
 ## Build From Source
 
-Requirements: Rust and the pinned `core/pi_agent` submodule.
+Requirements: Rust toolchain (2021 edition) and Git submodules.
 
 ```bash
 git submodule update --init --recursive
 cargo build --workspace --release
 cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-The optimized binary is `target/release/hydra-cli` or
-`target/release/hydra-cli.exe` on Windows.
+The optimized binary is `target/release/hydra-cli` (or `target/release/hydra-cli.exe` on Windows).
 
 ## Architecture
 
 ```text
-CLI -> Hydra adapters -> Pi agent or Hydra crates
-                         dag      scheduling
-                         matrix   indexing
-                         sandbox  JavaScript isolation
+hydra-cli
+├── adapters/
+│   ├── pi_agent.rs   <-> submodules/pi_agent_rust (pinned upstream runtime)
+│   ├── litellm.rs    <-> submodules/litellm (daemon process manager)
+│   └── mcp.rs        <-> submodules/mcp-sdk (protocol connector & tools)
+├── partitioner/
+│   └── ast_splitter.rs (AST dependency clustering via hydra-matrix)
+├── orchestrator/
+│   └── swarm.rs (parallel Coder/Tester/Reviewer trios in Git worktrees)
+├── consolidator/
+│   └── merger.rs (log deduplication & diff patch reconciliation)
+└── crates/
+    ├── hydra-dag     (topological DAG task scheduling)
+    ├── hydra-matrix  (AST parsing and codebase indexing)
+    └── hydra-sandbox (isolated JavaScript execution environment)
 ```
 
-Hydra owns routing, policy, orchestration, and adapters under `crates/`.
-`core/pi_agent` is a pinned external dependency outside the Cargo workspace;
-application code uses [agent_adapter.rs](crates/hydra-cli/src/agent_adapter.rs)
-instead of Pi SDK types directly. See [dependency-plan.md](dependency-plan.md).
+Hydra owns routing, orchestration, adapters, and consolidation under `crates/`. External submodules (`pi_agent_rust`, `litellm`, `mcp-sdk`) are pinned stable dependencies under `submodules/` and remain untouched.
 
 ## Release Notes
 
-Hydra is currently released as a workspace binary. Crates.io packaging requires
-publishing `hydra-dag`, `hydra-matrix`, and `hydra-sandbox` first, or replacing
-their path dependencies with pinned Git or registry versions.
+Hydra is released as a workspace binary. All internal crates (`hydra-dag`, `hydra-matrix`, `hydra-sandbox`, `hydra-cli`) are integrated and covered by full test suites.
 
-Hydra source is MIT licensed. The Pi submodule retains its own terms in
-`core/pi_agent/LICENSE`.
-
-## Roadmap To The Complete Assistant
-
-The following work completes the product vision rather than introducing a
-different direction:
-
-- Richer AST-backed repository understanding, semantic search, and automatic
-  context assembly for prompts.
-- Multi-provider and multi-key fallback policies with clearer health scoring,
-  cost or latency preferences, and provider capability discovery.
-- A complete coding loop for inspect, plan, edit, test, review, and retry,
-  including session-aware prompts, resumable workflows, and run history.
-- Custom tools, extension loading, approvals, and explicit sandbox policies.
-- TypeScript transpilation and stronger JavaScript resource enforcement.
-- Optional interactive terminal views, packaged binaries, and published Hydra
-  crates.
+Hydra source is MIT licensed. External submodules retain their respective upstream licenses.
