@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod matrix_tests {
-    use hydra_matrix::{CodeElement, CodeMatrix, ElementType, IndexConfig};
+    use hydra_matrix::{
+        CodeElement, CodeMatrix, ElementType, IncrementalWatcher, IndexConfig, SqliteIndexCache,
+    };
     use std::collections::HashMap;
     use std::path::PathBuf;
     use tempfile::TempDir;
@@ -373,6 +375,84 @@ export function exampleTypeScriptFunction(data: TypeScriptInterface): string {
             .await
             .unwrap();
         assert_eq!(ctx.code_skeleton, ctx_cached.code_skeleton);
+    }
+
+    #[tokio::test]
+    async fn test_calculate_blast_radius() {
+        let mut matrix = CodeMatrix::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let _test_files = create_test_files(&temp_dir).await;
+
+        matrix.config.paths = vec![temp_dir.path().to_string_lossy().to_string()];
+        matrix.index().await.unwrap();
+
+        // Calculate blast radius when helper_function changes
+        let blast_radius = matrix.calculate_blast_radius("helper_function").await.unwrap();
+        assert!(!blast_radius.is_empty(), "Blast radius should include impacted files");
+        
+        // test.rs contains helper_function and main_function (which calls helper_function)
+        let expected_path = temp_dir.path().join("test.rs");
+        assert!(blast_radius.contains(&expected_path));
+    }
+
+    #[tokio::test]
+    async fn test_incremental_watcher() {
+        let mut matrix = CodeMatrix::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("service.rs");
+
+        std::fs::write(&file_path, "pub fn compute() -> i32 { 42 }").unwrap();
+
+        matrix.config.paths = vec![temp_dir.path().to_string_lossy().to_string()];
+        
+        let mut watcher = IncrementalWatcher::new();
+        // First scan indexes the file
+        let reindexed1 = watcher.scan_and_reindex(&mut matrix).await.unwrap();
+        assert_eq!(reindexed1.len(), 1);
+        assert_eq!(matrix.size().await, 1);
+
+        // Second scan without changes returns 0 reindexed files
+        let reindexed2 = watcher.scan_and_reindex(&mut matrix).await.unwrap();
+        assert_eq!(reindexed2.len(), 0);
+
+        // Modify file and scan again
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+        std::fs::write(&file_path, "pub fn compute() -> i32 { 100 }\npub fn extra() {}").unwrap();
+
+        let reindexed3 = watcher.scan_and_reindex(&mut matrix).await.unwrap();
+        assert_eq!(reindexed3.len(), 1);
+        assert_eq!(matrix.size().await, 2);
+    }
+
+    #[tokio::test]
+    async fn test_sqlite_index_cache() {
+        let mut matrix = CodeMatrix::new().unwrap();
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("cached.rs");
+
+        std::fs::write(&file_path, "pub fn ping() -> bool { true }").unwrap();
+        matrix.config.paths = vec![temp_dir.path().to_string_lossy().to_string()];
+        matrix.index().await.unwrap();
+        assert_eq!(matrix.size().await, 1);
+
+        let db_path = temp_dir.path().join("cache.sqlite");
+        let cache = SqliteIndexCache::open(db_path.clone()).unwrap();
+        
+        // Persist
+        let saved_count = cache.persist(&matrix).await.unwrap();
+        assert_eq!(saved_count, 1);
+
+        // Restore into fresh matrix
+        let empty_matrix = CodeMatrix::new().unwrap();
+        assert_eq!(empty_matrix.size().await, 0);
+
+        let restored_count = cache.restore(&empty_matrix).await.unwrap();
+        assert_eq!(restored_count, 1);
+        assert_eq!(empty_matrix.size().await, 1);
+
+        let elements = empty_matrix.search("ping").await.unwrap();
+        assert_eq!(elements.len(), 1);
+        assert_eq!(elements[0].name, "ping");
     }
 }
 

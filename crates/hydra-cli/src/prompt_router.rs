@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
-    /// Project goal and architectural invariant registry.
+/// Project goal and architectural invariant registry.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[allow(dead_code)]
 pub struct ProjectGoalRegistry {
     pub project_name: String,
     pub primary_goals: Vec<String>,
@@ -40,6 +41,7 @@ impl Default for ProjectGoalRegistry {
     }
 }
 
+#[allow(dead_code)]
 impl ProjectGoalRegistry {
     /// Load from .hydra/goals.json or use defaults.
     pub async fn load_or_default(workspace_root: &Path) -> Self {
@@ -68,8 +70,10 @@ impl ProjectGoalRegistry {
 
 /// Universal KV-cache prefix aligner (Phase 3.5).
 /// Enforces deterministic prompt ordering to maximize provider prompt caching hit rate.
+#[allow(dead_code)]
 pub struct PromptPrefixAligner;
 
+#[allow(dead_code)]
 impl PromptPrefixAligner {
     /// Assemble prompts: system -> invariants -> docs -> AST -> user intent.
     pub fn build_cache_aligned_prompt(

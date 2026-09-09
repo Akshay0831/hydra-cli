@@ -4,7 +4,7 @@
 //! Evaluates consensus among Coder, Tester, and Reviewer outputs.
 
 use anyhow::Result;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -80,7 +80,7 @@ impl Consolidator {
         findings
     }
 
-    /// Reconciles diffs across partitions into a single unified consensus patch.
+    /// Reconcile diffs into unified patch; detect conflicts and merge non-overlapping edits.
     pub fn reconcile_diffs(diffs: &[String]) -> Result<String> {
         let non_empty: Vec<&str> = diffs
             .iter()
@@ -90,6 +90,42 @@ impl Consolidator {
 
         if non_empty.is_empty() {
             return Ok(String::new());
+        }
+
+        if non_empty.len() == 1 {
+            return Ok(non_empty[0].to_string());
+        }
+
+        // Parse file hunks and detect conflicts
+        let mut file_hunks: HashMap<String, Vec<(usize, usize)>> = HashMap::new();
+
+        for diff in &non_empty {
+            let mut current_file = String::new();
+            for line in diff.lines() {
+                if line.starts_with("+++ b/") {
+                    current_file = line["+++ b/".len()..].trim().to_string();
+                } else if line.starts_with("@@ -") && !current_file.is_empty() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if parts.len() >= 3 && parts[2].starts_with('+') {
+                        let new_info = &parts[2][1..];
+                        let mut num_parts = new_info.split(',');
+                        let start_line = num_parts.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
+                        let count = num_parts.next().and_then(|s| s.parse::<usize>().ok()).unwrap_or(1);
+                        let end_line = start_line + count;
+
+                        let entry = file_hunks.entry(current_file.clone()).or_default();
+                        for (existing_start, existing_end) in entry.iter() {
+                            if !(end_line < *existing_start || start_line > *existing_end) {
+                                anyhow::bail!(
+                                    "Semantic AST conflict: overlapping edits in '{}' at lines {}-{} and {}-{}",
+                                    current_file, start_line, end_line, existing_start, existing_end
+                                );
+                            }
+                        }
+                        entry.push((start_line, end_line));
+                    }
+                }
+            }
         }
 
         Ok(non_empty.join("\n\n"))
@@ -277,6 +313,19 @@ mod tests {
 
         let test_diff = "+++ b/tests/integration.rs\n+let x = res.unwrap();\n";
         assert!(Consolidator::validate_patch_invariants(test_diff).is_ok());
+    }
+
+    #[test]
+    fn test_reconcile_diffs_detects_overlapping_semantic_conflicts() {
+        let diff1 = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -10,5 +10,6 @@\n+pub fn a() {}\n";
+        let diff2_clean = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -50,5 +50,6 @@\n+pub fn b() {}\n";
+        let diff3_conflict = "--- a/src/lib.rs\n+++ b/src/lib.rs\n@@ -12,4 +12,5 @@\n+pub fn overlap() {}\n";
+
+        // Non-overlapping edits in different regions of the same file merge cleanly
+        assert!(Consolidator::reconcile_diffs(&[diff1.to_string(), diff2_clean.to_string()]).is_ok());
+
+        // Overlapping edits produce a semantic conflict error
+        assert!(Consolidator::reconcile_diffs(&[diff1.to_string(), diff3_conflict.to_string()]).is_err());
     }
 }
 

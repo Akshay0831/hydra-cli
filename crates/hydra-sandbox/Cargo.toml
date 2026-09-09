@@ -1,7 +1,9 @@
-﻿[package]
+[package]
 name = "hydra-sandbox"
-version = "0.1.0"
-edition = "2021"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 
 [dependencies]
 tokio = { workspace = true, features = ["full"] }
@@ -10,3 +12,6 @@ uuid = { workspace = true }
 rquickjs = { version = "0.12.2", features = ["full", "futures"] }
 serde_json = { workspace = true }
 serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

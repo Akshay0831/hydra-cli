@@ -2,6 +2,7 @@ pub mod adapters;
 pub mod agent_adapter;
 mod commands;
 pub mod consolidator;
+pub mod daemon;
 mod error;
 pub mod orchestrator;
 pub mod partitioner;
@@ -12,13 +13,14 @@ mod retry_manager;
 mod retry_state_store;
 mod routing;
 mod spinner;
+pub mod toolchains;
 mod utils;
 
 use crate::commands::CommandHandler;
 use anyhow::Result;
 use clap::Parser;
 
-/// CLI entry point for Hydra
+/// CLI entry point
 #[derive(Debug, Parser)]
 #[command(name = "hydra", version, about = "Hydra agentic coding assistant")]
 struct Cli {

@@ -373,6 +373,21 @@ impl CodeMatrix {
         Ok(indexed_files)
     }
 
+    /// Retrieve all files matching the configured paths without indexing them
+    pub fn get_target_files(&self) -> Result<Vec<PathBuf>> {
+        let mut seen_files = HashSet::new();
+        let mut result = Vec::new();
+        for pattern in &self.config.paths {
+            let matched_files = self.collect_matching_files(pattern)?;
+            for file_path in matched_files {
+                if seen_files.insert(file_path.clone()) {
+                    result.push(file_path);
+                }
+            }
+        }
+        Ok(result)
+    }
+
     /// Index a specific file
     pub async fn index_file(&mut self, file_path: &Path) -> Result<bool> {
         // Check file size
@@ -397,6 +412,7 @@ impl CodeMatrix {
 
             // Add elements to index
             let mut index = self.index.write().await;
+            index.retain(|_, el| el.file_path != file_path);
             for mut element in elements {
                 element.dependencies = dependencies.clone();
                 index.insert(element.id.clone(), element);
@@ -484,6 +500,48 @@ impl CodeMatrix {
         }
 
         Ok(sort_elements(dependents))
+    }
+
+    /// Calculate blast radius (Phase 6.2):
+    /// Returns all 1-hop and 2-hop impacted symbols, files, and callers
+    /// if a given target symbol or file changes.
+    pub async fn calculate_blast_radius(&self, target_symbol_or_path: &str) -> Result<HashSet<PathBuf>> {
+        let index = self.index.read().await;
+        let mut impacted_files = HashSet::new();
+        let mut direct_dependent_symbols = HashSet::new();
+
+        // 1. Find all matching code elements for target
+        for element in index.values() {
+            if element.name == target_symbol_or_path
+                || element.id.contains(target_symbol_or_path)
+                || element.file_path.to_string_lossy().contains(target_symbol_or_path)
+            {
+                impacted_files.insert(element.file_path.clone());
+                direct_dependent_symbols.insert(element.name.clone());
+            }
+        }
+
+        // 2. 1-hop: find all elements that depend on these symbols
+        let mut second_hop_symbols = HashSet::new();
+        for element in index.values() {
+            for dep in &direct_dependent_symbols {
+                if element.dependencies.contains(dep) || element.content.contains(dep) {
+                    impacted_files.insert(element.file_path.clone());
+                    second_hop_symbols.insert(element.name.clone());
+                }
+            }
+        }
+
+        // 3. 2-hop: find callers of callers
+        for element in index.values() {
+            for dep2 in &second_hop_symbols {
+                if element.dependencies.contains(dep2) || element.content.contains(dep2) {
+                    impacted_files.insert(element.file_path.clone());
+                }
+            }
+        }
+
+        Ok(impacted_files)
     }
 
     /// Get the total number of indexed elements
@@ -983,5 +1041,164 @@ impl ContextLoader {
         }
 
         Ok(result)
+    }
+}
+
+/// Incremental File Watcher & Indexer (Phase 6.1).
+pub struct IncrementalWatcher {
+    last_mtimes: HashMap<PathBuf, std::time::SystemTime>,
+}
+
+impl Default for IncrementalWatcher {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl IncrementalWatcher {
+    pub fn new() -> Self {
+        Self {
+            last_mtimes: HashMap::new(),
+        }
+    }
+
+    /// Scans paths in matrix config and incrementally re-indexes only files that changed or are newly added.
+    pub async fn scan_and_reindex(&mut self, matrix: &mut CodeMatrix) -> Result<Vec<PathBuf>> {
+        let mut reindexed = Vec::new();
+        let target_files = matrix.get_target_files()?;
+
+        for file in target_files {
+            if let Ok(metadata) = tokio::fs::metadata(&file).await {
+                if let Ok(mtime) = metadata.modified() {
+                    let should_reindex = match self.last_mtimes.get(&file) {
+                        Some(&prev) => mtime > prev,
+                        None => true,
+                    };
+
+                    if should_reindex {
+                        if matrix.should_index_file(&file).await? && matrix.index_file(&file).await? {
+                            reindexed.push(file.clone());
+                            self.last_mtimes.insert(file, mtime);
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(reindexed)
+    }
+}
+
+/// Embedded SQLite Symbol Cache with WAL mode (Phase 6.3).
+pub struct SqliteIndexCache {
+    db_path: PathBuf,
+}
+
+impl SqliteIndexCache {
+    pub fn open(db_path: PathBuf) -> Result<Self> {
+        if let Some(parent) = db_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let conn = rusqlite::Connection::open(&db_path)?;
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             CREATE TABLE IF NOT EXISTS elements (
+                 id TEXT PRIMARY KEY,
+                 name TEXT NOT NULL,
+                 element_type TEXT NOT NULL,
+                 file_path TEXT NOT NULL,
+                 line_number INTEGER NOT NULL,
+                 content TEXT NOT NULL,
+                 dependencies TEXT NOT NULL,
+                 metadata TEXT NOT NULL
+             );"
+        )?;
+        Ok(Self { db_path })
+    }
+
+    pub async fn persist(&self, matrix: &CodeMatrix) -> Result<usize> {
+        let index = matrix.index.read().await;
+        let conn = rusqlite::Connection::open(&self.db_path)?;
+        let mut stmt = conn.prepare(
+            "INSERT OR REPLACE INTO elements (
+                id, name, element_type, file_path, line_number, content, dependencies, metadata
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);"
+        )?;
+
+        let mut count = 0;
+        for el in index.values() {
+            let deps_json = serde_json::to_string(&el.dependencies)?;
+            let meta_json = serde_json::to_string(&el.metadata)?;
+            let type_str = format!("{:?}", el.element_type);
+            stmt.execute(rusqlite::params![
+                el.id,
+                el.name,
+                type_str,
+                el.file_path.to_string_lossy().to_string(),
+                el.line_number as i64,
+                el.content,
+                deps_json,
+                meta_json,
+            ])?;
+            count += 1;
+        }
+
+        Ok(count)
+    }
+
+    pub async fn restore(&self, matrix: &CodeMatrix) -> Result<usize> {
+        let conn = rusqlite::Connection::open(&self.db_path)?;
+        let mut stmt = conn.prepare(
+            "SELECT id, name, element_type, file_path, line_number, content, dependencies, metadata FROM elements;"
+        )?;
+
+        let mut rows = stmt.query([])?;
+        let mut count = 0;
+        let mut index = matrix.index.write().await;
+
+        while let Some(row) = rows.next()? {
+            let id: String = row.get(0)?;
+            let name: String = row.get(1)?;
+            let type_str: String = row.get(2)?;
+            let path_str: String = row.get(3)?;
+            let line_number: i64 = row.get(4)?;
+            let content: String = row.get(5)?;
+            let deps_json: String = row.get(6)?;
+            let meta_json: String = row.get(7)?;
+
+            let element_type = match type_str.as_str() {
+                "Function" => ElementType::Function,
+                "Method" => ElementType::Method,
+                "Struct" => ElementType::Struct,
+                "Enum" => ElementType::Enum,
+                "Class" => ElementType::Class,
+                "Interface" => ElementType::Interface,
+                "Trait" => ElementType::Trait,
+                "Module" => ElementType::Module,
+                "Constant" => ElementType::Constant,
+                "Import" => ElementType::Import,
+                _ => ElementType::Variable,
+            };
+
+            let dependencies: Vec<String> = serde_json::from_str(&deps_json).unwrap_or_default();
+            let metadata: HashMap<String, String> = serde_json::from_str(&meta_json).unwrap_or_default();
+
+            let el = CodeElement {
+                id: id.clone(),
+                name,
+                element_type,
+                file_path: PathBuf::from(path_str),
+                line_number: line_number as usize,
+                content,
+                dependencies,
+                metadata,
+            };
+
+            index.insert(id, el);
+            count += 1;
+        }
+
+        Ok(count)
     }
 }

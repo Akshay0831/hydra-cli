@@ -84,7 +84,6 @@ Hydra is organized as a modular, traceable workspace. Each subsystem maintains i
 
 | Component | Documentation | Role |
 |---|---|---|
-| **Core Roadmap** | [ROADMAP.md](ROADMAP.md) | High-performance headless backend roadmap & phases |
 | **CLI & Swarm** | [crates/hydra-cli/README.md](crates/hydra-cli/README.md) | CLI commands, multi-agent swarm orchestrator, and facade adapters |
 | **AST Matrix** | [crates/hydra-matrix/README.md](crates/hydra-matrix/README.md) | AST indexing, context loader, and skeletonization engine |
 | **Task DAG** | [crates/hydra-dag/README.md](crates/hydra-dag/README.md) | Concurrent DAG execution and dependency graph engine |
@@ -94,7 +93,6 @@ Hydra is organized as a modular, traceable workspace. Each subsystem maintains i
 ```text
 hydra-cli
 ├── README.md                   ← Navigation Hub
-├── ROADMAP.md                  ← Global Architecture & Phase Milestones
 ├── docs/profiles/ai-dense.toml ← Default Machine-Dense Doc Specification
 ├── crates/
 │   ├── hydra-cli/README.md     ← Swarm, adapters, and CLI commands

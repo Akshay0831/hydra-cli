@@ -1,29 +1,29 @@
 [package]
 name = "hydra-cli"
-version = "0.2.0"
-edition = "2021"
-description = "Hydra CLI for agent workflows, routing, indexing, sandboxing, and task execution"
-license = "MIT"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
 readme = "../../README.md"
-repository = "https://github.com/Akshay0831/hydra-cli"
+description = "Hydra CLI for agent workflows, routing, indexing, sandboxing, and task execution"
 
 [dependencies]
 pi = { package = "pi_agent_rust", version = "0.2.0", path = "../../submodules/pi_agent_rust" }
-hydra-matrix = { version = "0.1.0", path = "../hydra-matrix" }
-hydra-sandbox = { version = "0.1.0", path = "../hydra-sandbox" }
-hydra-dag = { version = "0.1.0", path = "../hydra-dag" }
+hydra-matrix = { workspace = true }
+hydra-sandbox = { workspace = true }
+hydra-dag = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 clap = { version = "4.5", features = ["derive"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
-async-trait = "0.1"
+async-trait = { workspace = true }
 rand = "0.8"
 thiserror = "1.0"
-tempfile = "3.27"
+tempfile = { workspace = true }
 
 [dev-dependencies]
-tempfile = "3.27"
+tempfile = { workspace = true }
 
 [features]
 default = []
