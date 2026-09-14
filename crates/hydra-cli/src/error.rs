@@ -14,7 +14,7 @@ pub enum HydraCliError {
     #[error("Configuration error: {0}")]
     Configuration(anyhow::Error),
     #[error("IO error: {0}")]
-    Io(std::io::Error),
+    Io(#[from] std::io::Error),
     #[error("No eligible provider candidate for {request}")]
     NoEligibleCandidate { request: String },
     #[error("Provider attempt failed for {candidate} (attempt {attempt}): {error}")]
@@ -52,17 +52,17 @@ impl ErrorHandler {
 
     pub fn is_retryable(&self, error: &HydraCliError) -> bool {
         match error {
-            HydraCliError::TaskExecution(error) => {
-                let message = error.to_string().to_ascii_lowercase();
+            HydraCliError::TaskExecution(e) => {
+                let msg = e.to_string().to_ascii_lowercase();
                 ["timeout", "temporary", "network", "rate limit"]
                     .iter()
-                    .any(|marker| message.contains(marker))
+                    .any(|marker| msg.contains(marker))
             }
             HydraCliError::ProviderAttempt { error, .. } => {
-                let message = error.to_ascii_lowercase();
+                let msg = error.to_ascii_lowercase();
                 ["timeout", "temporary", "network", "rate limit", "429"]
                     .iter()
-                    .any(|marker| message.contains(marker))
+                    .any(|marker| msg.contains(marker))
             }
             _ => false,
         }
@@ -72,11 +72,5 @@ impl ErrorHandler {
 impl From<anyhow::Error> for HydraCliError {
     fn from(error: anyhow::Error) -> Self {
         Self::TaskExecution(error)
-    }
-}
-
-impl From<std::io::Error> for HydraCliError {
-    fn from(error: std::io::Error) -> Self {
-        Self::Io(error)
     }
 }

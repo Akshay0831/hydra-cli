@@ -229,7 +229,7 @@ where
         let mut queue: Vec<String> = self
             .dependency_counts
             .iter()
-            .filter(|(_, &count)| count == 0)
+            .filter(|(_, count)| **count == 0)
             .map(|(id, _)| id.clone())
             .collect();
 
@@ -582,7 +582,7 @@ mod tests {
 
         let task = SimpleTask::new("task1".to_string(), vec![], || Ok("result1".to_string()));
 
-        graph.add_task(Box::new(task)).unwrap();
+        graph.add_task(Box::new(task)).expect("Failed to add task");
 
         let result = graph.execute_sequential().await;
         println!("Result: {:?}", result);
@@ -606,7 +606,7 @@ mod tests {
 
         graph
             .add_tasks(vec![Box::new(task1), Box::new(task2)])
-            .unwrap();
+            .expect("Failed to add tasks");
 
         let result = graph.execute_sequential().await;
         assert!(result.all_successful());

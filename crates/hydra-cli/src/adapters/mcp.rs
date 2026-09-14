@@ -38,7 +38,8 @@ impl McpAdapter {
         Ok(vec![
             McpToolInfo {
                 name: "cargo_test".to_string(),
-                description: "Runs cargo test on the repository and captures stdout/stderr".to_string(),
+                description: "Runs cargo test on the repository and captures stdout/stderr"
+                    .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -49,7 +50,8 @@ impl McpAdapter {
             },
             McpToolInfo {
                 name: "cargo_check".to_string(),
-                description: "Runs cargo check to isolate compiler diagnostics and type errors".to_string(),
+                description: "Runs cargo check to isolate compiler diagnostics and type errors"
+                    .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -59,7 +61,8 @@ impl McpAdapter {
             },
             McpToolInfo {
                 name: "hydra_code_scout".to_string(),
-                description: "Searches AST symbols, callers, and definitions across the workspace".to_string(),
+                description: "Searches AST symbols, callers, and definitions across the workspace"
+                    .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -70,7 +73,9 @@ impl McpAdapter {
             },
             McpToolInfo {
                 name: "hydra_doc_search".to_string(),
-                description: "Retrieves architectural invariants and tables from hierarchical doc tree".to_string(),
+                description:
+                    "Retrieves architectural invariants and tables from hierarchical doc tree"
+                        .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -81,7 +86,8 @@ impl McpAdapter {
             },
             McpToolInfo {
                 name: "hydra_git_blame".to_string(),
-                description: "Queries git commit history and author intent for legacy modules".to_string(),
+                description: "Queries git commit history and author intent for legacy modules"
+                    .to_string(),
                 input_schema: serde_json::json!({
                     "type": "object",
                     "properties": {
@@ -108,27 +114,36 @@ impl McpAdapter {
                 if let Some(p) = pkg {
                     cmd.arg("-p").arg(p);
                 }
-                let output = cmd.output().await?;
+                cmd.kill_on_drop(true);
+                let output = tokio::time::timeout(std::time::Duration::from_secs(60), cmd.output())
+                    .await
+                    .map_err(|_| anyhow::anyhow!("cargo test timed out"))??;
                 Ok(serde_json::json!({
                     "status": if output.status.success() { "success" } else { "failure" },
-                    "stdout": String::from_utf8_lossy(&output.stdout),
-                    "stderr": String::from_utf8_lossy(&output.stderr),
+                    "stdout": bounded_output(&output.stdout),
+                    "stderr": bounded_output(&output.stderr),
                     "code": output.status.code(),
                 }))
             }
             "cargo_check" => {
                 let mut cmd = tokio::process::Command::new("cargo");
                 cmd.arg("check");
-                let output = cmd.output().await?;
+                cmd.kill_on_drop(true);
+                let output = tokio::time::timeout(std::time::Duration::from_secs(60), cmd.output())
+                    .await
+                    .map_err(|_| anyhow::anyhow!("cargo check timed out"))??;
                 Ok(serde_json::json!({
                     "status": if output.status.success() { "success" } else { "failure" },
-                    "stdout": String::from_utf8_lossy(&output.stdout),
-                    "stderr": String::from_utf8_lossy(&output.stderr),
+                    "stdout": bounded_output(&output.stdout),
+                    "stderr": bounded_output(&output.stderr),
                     "code": output.status.code(),
                 }))
             }
             "hydra_code_scout" => {
-                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or_default();
+                let query = params
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
                 let mut matrix = hydra_matrix::CodeMatrix::new()?;
                 matrix.config.paths = vec!["./**/*.rs".to_string()];
                 let _ = matrix.index().await;
@@ -148,12 +163,21 @@ impl McpAdapter {
                 Ok(serde_json::json!({ "results": symbols, "query": query }))
             }
             "hydra_doc_search" => {
-                let query = params.get("query").and_then(|v| v.as_str()).unwrap_or_default().to_lowercase();
+                let query = params
+                    .get("query")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default()
+                    .chars()
+                    .take(512)
+                    .collect::<String>()
+                    .to_lowercase();
                 let mut matching_sections = Vec::new();
                 for entry in walkdir_matching_docs(".") {
                     if let Ok(content) = tokio::fs::read_to_string(&entry).await {
                         for line in content.lines() {
-                            if line.to_lowercase().contains(&query) && (line.starts_with('|') || line.starts_with('-')) {
+                            if line.to_lowercase().contains(&query)
+                                && (line.starts_with('|') || line.starts_with('-'))
+                            {
                                 matching_sections.push(line.to_string());
                             }
                         }
@@ -165,8 +189,15 @@ impl McpAdapter {
                 }))
             }
             "hydra_git_blame" => {
-                let file = params.get("file_path").and_then(|v| v.as_str()).unwrap_or_default();
-                let limit = params.get("limit").and_then(|v| v.as_u64()).unwrap_or(5);
+                let file = params
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_default();
+                let limit = params
+                    .get("limit")
+                    .and_then(|v| v.as_u64())
+                    .unwrap_or(5)
+                    .min(100);
                 let out = tokio::process::Command::new("git")
                     .args(["log", &format!("-n{limit}"), "--oneline", "--", file])
                     .output()
@@ -194,9 +225,15 @@ fn walkdir_matching_docs(root: &str) -> Vec<std::path::PathBuf> {
     if let Ok(entries) = std::fs::read_dir(root) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_file() && path.extension().is_some_and(|ext| ext == "md") {
+            let Ok(metadata) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            if metadata.file_type().is_symlink() {
+                continue;
+            }
+            if metadata.is_file() && path.extension().is_some_and(|ext| ext == "md") {
                 docs.push(path);
-            } else if path.is_dir() {
+            } else if metadata.is_dir() && docs.len() < 1000 {
                 let name = path.file_name().unwrap_or_default().to_string_lossy();
                 if name != "target" && name != ".git" && name != "node_modules" {
                     docs.extend(walkdir_matching_docs(&path.to_string_lossy()));
@@ -205,6 +242,16 @@ fn walkdir_matching_docs(root: &str) -> Vec<std::path::PathBuf> {
         }
     }
     docs
+}
+
+fn bounded_output(bytes: &[u8]) -> String {
+    const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+    let output = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_OUTPUT_BYTES)]);
+    if bytes.len() > MAX_OUTPUT_BYTES {
+        format!("{output}\n[output truncated]")
+    } else {
+        output.trim().to_string()
+    }
 }
 
 #[cfg(test)]
@@ -229,7 +276,9 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_unknown_tool_fails() {
         let adapter = McpAdapter::new("cargo".to_string(), vec![]);
-        let res = adapter.call_tool("non_existent_tool", serde_json::json!({})).await;
+        let res = adapter
+            .call_tool("non_existent_tool", serde_json::json!({}))
+            .await;
         assert!(res.is_err());
         assert!(res.unwrap_err().to_string().contains("Unknown MCP tool"));
     }
@@ -250,7 +299,9 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_call_hydra_doc_search() {
         let adapter = McpAdapter::new("cargo".to_string(), vec![]);
-        let res = adapter.call_tool("hydra_doc_search", serde_json::json!({ "query": "hydra" })).await;
+        let res = adapter
+            .call_tool("hydra_doc_search", serde_json::json!({ "query": "hydra" }))
+            .await;
         assert!(res.is_ok());
         let val = res.unwrap();
         assert_eq!(val.get("query").unwrap(), "hydra");
@@ -260,10 +311,14 @@ mod tests {
     #[tokio::test]
     async fn test_mcp_call_hydra_git_blame() {
         let adapter = McpAdapter::new("cargo".to_string(), vec![]);
-        let res = adapter.call_tool("hydra_git_blame", serde_json::json!({ "file_path": "README.md", "limit": 2 })).await;
+        let res = adapter
+            .call_tool(
+                "hydra_git_blame",
+                serde_json::json!({ "file_path": "README.md", "limit": 2 }),
+            )
+            .await;
         assert!(res.is_ok());
         let val = res.unwrap();
         assert_eq!(val.get("file").unwrap(), "README.md");
     }
 }
-

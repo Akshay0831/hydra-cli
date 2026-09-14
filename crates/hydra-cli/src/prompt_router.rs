@@ -179,9 +179,19 @@ impl PromptRouter {
         working_directory: std::path::PathBuf,
         on_text: TextOutputWrapper,
     ) -> Result<(), HydraCliError> {
+        tracing::debug!(
+            provider = ?request.provider,
+            model = ?request.model,
+            profile = ?request.profile,
+            tools_count = request.required_tools.len(),
+            message_length = message.len(),
+            "Prompt routing started"
+        );
+
         let healthy_candidates = self.retry_manager.get_healthy_candidates(&request, &[]);
 
         if healthy_candidates.is_empty() {
+            tracing::warn!("No healthy candidates available for prompt routing");
             return Err(HydraCliError::NoEligibleCandidate {
                 request: format!(
                     "provider={:?}, model={:?}, profile={:?}",

@@ -7,7 +7,7 @@ use anyhow::Result;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 use crate::adapters::litellm::LiteLLMManager;
 use crate::adapters::mcp::McpAdapter;
@@ -24,6 +24,14 @@ pub struct GitWorktreeGuard {
 impl GitWorktreeGuard {
     /// Creates an isolated git worktree under `.hydra/worktrees/<id>`.
     pub async fn create(base_repo: &Path, worktree_id: &str) -> Result<Self> {
+        if worktree_id.is_empty()
+            || !worktree_id
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
+        {
+            anyhow::bail!("invalid worktree identifier: {worktree_id}");
+        }
+
         let worktree_dir = base_repo.join(".hydra").join("worktrees").join(worktree_id);
         if worktree_dir.exists() {
             let _ = tokio::fs::remove_dir_all(&worktree_dir).await;
@@ -46,13 +54,11 @@ impl GitWorktreeGuard {
                 worktree_id: worktree_id.to_string(),
                 path: worktree_dir,
             }),
-            _ => {
-                // If git worktree add failed (e.g. non-git repo), fallback to using directory directly
-                Ok(Self {
-                    worktree_id: worktree_id.to_string(),
-                    path: base_repo.to_path_buf(),
-                })
-            }
+            Ok(out) => anyhow::bail!(
+                "failed to create isolated worktree: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+            Err(error) => Err(error.into()),
         }
     }
 
@@ -64,6 +70,35 @@ impl GitWorktreeGuard {
             .output()
             .await?;
         Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    }
+
+    pub async fn changed_paths(&self) -> Result<Vec<PathBuf>> {
+        let tracked = tokio::process::Command::new("git")
+            .args(["diff", "--name-only"])
+            .current_dir(&self.path)
+            .output()
+            .await?;
+        let untracked = tokio::process::Command::new("git")
+            .args(["ls-files", "--others", "--exclude-standard"])
+            .current_dir(&self.path)
+            .output()
+            .await?;
+
+        let mut paths = Vec::new();
+        for output in [tracked, untracked] {
+            if !output.status.success() {
+                anyhow::bail!("failed to inspect worktree changes");
+            }
+            paths.extend(
+                String::from_utf8_lossy(&output.stdout)
+                    .lines()
+                    .filter(|line| !line.is_empty())
+                    .map(PathBuf::from),
+            );
+        }
+        paths.sort();
+        paths.dedup();
+        Ok(paths)
     }
 
     /// Cleans up and prunes the worktree directory on completion.
@@ -229,6 +264,23 @@ impl SwarmOrchestrator {
                 })
                 .await?;
 
+                let allowed_paths = partition
+                    .all_files
+                    .iter()
+                    .map(|path| path.strip_prefix(&base_path).unwrap_or(path).to_path_buf())
+                    .collect::<Vec<_>>();
+                for changed_path in worktree.changed_paths().await? {
+                    if !allowed_paths.iter().any(|allowed| {
+                        changed_path == *allowed || changed_path.starts_with(allowed)
+                    }) {
+                        let _ = worktree.teardown().await;
+                        anyhow::bail!(
+                            "coder modified file outside assigned scope: {}",
+                            changed_path.display()
+                        );
+                    }
+                }
+
                 let diff = worktree.get_diff().await.unwrap_or_default();
                 let _ = tx
                     .send(SwarmEvent::DiffReady {
@@ -385,7 +437,10 @@ mod tests {
     async fn test_swarm_orchestrator_empty_partitions() {
         let orchestrator = SwarmOrchestrator::new(SwarmConfig::default(), None);
         let (tx, _rx) = mpsc::channel(16);
-        let results = orchestrator.run_swarm(Path::new("."), "task", vec![], tx).await.unwrap();
+        let results = orchestrator
+            .run_swarm(Path::new("."), "task", vec![], tx)
+            .await
+            .unwrap();
         assert!(results.is_empty());
     }
 
@@ -398,4 +453,3 @@ mod tests {
         assert!(guard.teardown().await.is_ok());
     }
 }
-

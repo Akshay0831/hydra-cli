@@ -92,7 +92,10 @@ impl MultiToolchainGate {
 
             let run_fut = async {
                 #[cfg(windows)]
-                let mut cmd_builder = if tc == ToolchainKind::Npm || tc == ToolchainKind::Pnpm || tc == ToolchainKind::Bun {
+                let mut cmd_builder = if tc == ToolchainKind::Npm
+                    || tc == ToolchainKind::Pnpm
+                    || tc == ToolchainKind::Bun
+                {
                     let mut c = tokio::process::Command::new("cmd");
                     c.arg("/C").arg(cmd);
                     c
@@ -104,6 +107,7 @@ impl MultiToolchainGate {
                 let mut cmd_builder = tokio::process::Command::new(cmd);
 
                 cmd_builder
+                    .kill_on_drop(true)
                     .args(args)
                     .current_dir(workspace_root)
                     .output()
@@ -112,8 +116,8 @@ impl MultiToolchainGate {
 
             match tokio::time::timeout(timeout_duration, run_fut).await {
                 Ok(Ok(output)) => {
-                    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                    let stdout = bounded_output(&output.stdout);
+                    let stderr = bounded_output(&output.stderr);
                     let combined = if !stderr.is_empty() {
                         format!("{stdout}\n{stderr}").trim().to_string()
                     } else {
@@ -123,7 +127,11 @@ impl MultiToolchainGate {
                         toolchain: tc,
                         detected: true,
                         passed: output.status.success(),
-                        output: if combined.is_empty() { "Check succeeded".to_string() } else { combined },
+                        output: if combined.is_empty() {
+                            "Check succeeded".to_string()
+                        } else {
+                            combined
+                        },
                     });
                 }
                 Ok(Err(e)) => {
@@ -139,13 +147,23 @@ impl MultiToolchainGate {
                         toolchain: tc,
                         detected: true,
                         passed: false,
-                        output: "Execution timed out (15s limit reached)".to_string(),
+                        output: "Execution timed out (60s limit reached)".to_string(),
                     });
                 }
             }
         }
 
         reports
+    }
+}
+
+fn bounded_output(bytes: &[u8]) -> String {
+    const MAX_OUTPUT_BYTES: usize = 64 * 1024;
+    let output = String::from_utf8_lossy(&bytes[..bytes.len().min(MAX_OUTPUT_BYTES)]);
+    if bytes.len() > MAX_OUTPUT_BYTES {
+        format!("{output}\n[output truncated]")
+    } else {
+        output.trim().to_string()
     }
 }
 
@@ -180,12 +198,20 @@ impl BenchmarkMetrics {
         out.push(format!(
             "| Time to Consensus | {:.2}s | < 30.0s | {} |",
             self.time_to_consensus_secs,
-            if self.time_to_consensus_secs <= 30.0 { "OPTIMAL" } else { "DEGRADED" }
+            if self.time_to_consensus_secs <= 30.0 {
+                "OPTIMAL"
+            } else {
+                "DEGRADED"
+            }
         ));
         out.push(format!(
             "| Token Efficiency Ratio | {:.1} tok/line | < 80 tok/line | {} |",
             self.token_efficiency_ratio(),
-            if self.token_efficiency_ratio() <= 80.0 { "OPTIMAL" } else { "EXCESSIVE" }
+            if self.token_efficiency_ratio() <= 80.0 {
+                "OPTIMAL"
+            } else {
+                "EXCESSIVE"
+            }
         ));
         out.push(format!(
             "| Duplication Preventions | {} | > 0 | ENFORCED |",
@@ -194,17 +220,29 @@ impl BenchmarkMetrics {
         out.push(format!(
             "| Comment Density Score | {:.1}% | <= 20.0% | {} |",
             self.comment_density_score * 100.0,
-            if self.comment_density_score <= 0.20 { "PASSED" } else { "BLOATED" }
+            if self.comment_density_score <= 0.20 {
+                "PASSED"
+            } else {
+                "BLOATED"
+            }
         ));
         out.push(format!(
             "| Prompt Cache Hit Rate | {:.1}% | >= 75.0% | {} |",
             self.prompt_cache_hit_rate * 100.0,
-            if self.prompt_cache_hit_rate >= 0.75 { "OPTIMAL" } else { "COLD" }
+            if self.prompt_cache_hit_rate >= 0.75 {
+                "OPTIMAL"
+            } else {
+                "COLD"
+            }
         ));
         out.push(format!(
             "| Estimated Run Cost | ${:.4} | < $0.05 | {} |",
             self.estimated_cost_usd,
-            if self.estimated_cost_usd < 0.05 { "ECONOMIC" } else { "HIGH" }
+            if self.estimated_cost_usd < 0.05 {
+                "ECONOMIC"
+            } else {
+                "HIGH"
+            }
         ));
         out.join("\n")
     }
@@ -216,7 +254,7 @@ mod tests {
 
     #[test]
     fn test_toolchain_detection() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::Builder::new().tempdir().unwrap();
         std::fs::write(temp.path().join("Cargo.toml"), "[package]").unwrap();
         std::fs::write(temp.path().join("package.json"), "{}").unwrap();
 
@@ -228,7 +266,7 @@ mod tests {
 
     #[test]
     fn test_toolchain_detection_pnpm_bun_python_go() {
-        let temp = tempfile::tempdir().unwrap();
+        let temp = tempfile::Builder::new().tempdir().unwrap();
         std::fs::write(temp.path().join("pnpm-lock.yaml"), "").unwrap();
         std::fs::write(temp.path().join("pyproject.toml"), "").unwrap();
         std::fs::write(temp.path().join("go.mod"), "module test").unwrap();

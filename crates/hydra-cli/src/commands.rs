@@ -570,6 +570,16 @@ impl CommandHandler {
                     .with_required_capability(Capability::from_str(capability)?);
             }
         }
+
+        // Security: Log routing configuration
+        tracing::debug!(
+            provider = ?provider,
+            model = ?model,
+            profile = ?profile,
+            tools_count = tools.len(),
+            capabilities_count = capabilities.len(),
+            "Security: Routing configuration validated"
+        );
         let request = RoutingRequest {
             purpose,
             required_tools: tools,
@@ -606,9 +616,7 @@ impl CommandHandler {
         let _configured = match RoutingConfig::load(config) {
             Ok(configured) => configured,
             Err(error) => {
-                return Err(HydraCliError::Configuration(anyhow::anyhow!(
-                    "Failed to load config: {error}"
-                )));
+                return Err(HydraCliError::Configuration(error));
             }
         };
         let strategy = match parse_execution_strategy(&strategy) {
@@ -619,22 +627,11 @@ impl CommandHandler {
         };
 
         let task_definitions = if let Some(tasks_path) = tasks_path {
-            let contents = std::fs::read_to_string(&tasks_path).map_err(|error| {
-                HydraCliError::TaskExecution(anyhow::anyhow!(
-                    "Failed to read task file {}: {}",
-                    tasks_path.display(),
-                    error
-                ))
-            })?;
+            let contents = std::fs::read_to_string(&tasks_path)
+                .map_err(|error| HydraCliError::TaskExecution(error.into()))?;
             serde_json::from_str::<TaskFile>(&contents)
                 .map(|file| file.tasks)
-                .map_err(|error| {
-                    HydraCliError::TaskExecution(anyhow::anyhow!(
-                        "Failed to parse task file {}: {}",
-                        tasks_path.display(),
-                        error
-                    ))
-                })?
+                .map_err(|error| HydraCliError::TaskExecution(error.into()))?
         } else {
             task.into_iter()
                 .enumerate()
@@ -669,12 +666,7 @@ impl CommandHandler {
                     definition.dependencies,
                     move || Ok(description.clone()),
                 )))
-                .map_err(|error| {
-                    HydraCliError::TaskExecution(anyhow::anyhow!(
-                        "Failed to add task to graph: {}",
-                        error
-                    ))
-                })?;
+                .map_err(HydraCliError::TaskExecution)?;
         }
 
         feedback.info_message(format!(
@@ -697,9 +689,7 @@ impl CommandHandler {
             }
             progress_manager.complete_all();
             drop(spinner_guard);
-            return Err(HydraCliError::TaskExecution(anyhow::anyhow!(
-                "{}", error_msg
-            )));
+            return Err(HydraCliError::TaskExecution(anyhow::anyhow!(error_msg)));
         }
 
         for task_id in results.successful.keys() {
@@ -748,6 +738,14 @@ impl CommandHandler {
     ) -> Result<(), HydraCliError> {
         feedback.start_spinner(format!("Indexing {}", root.display()));
         feedback.update_spinner("Scanning files".to_string());
+
+        // Security: Log indexing parameters
+        tracing::debug!(
+            root_path = %root.display(),
+            languages_count = languages.len(),
+            "Security: Code indexing started"
+        );
+
         let languages = parse_languages(&languages);
         if languages.is_empty() {
             feedback.info_message(
@@ -770,9 +768,7 @@ impl CommandHandler {
             Ok(matrix) => matrix,
             Err(error) => {
                 feedback.stop_spinner();
-                return Err(HydraCliError::Indexing(anyhow::anyhow!(
-                    "Failed to create code matrix: {error}"
-                )));
+                return Err(HydraCliError::Indexing(error));
             }
         };
 
@@ -788,19 +784,13 @@ impl CommandHandler {
             progress_manager.complete_all();
             feedback.stop_spinner();
             return Err(HydraCliError::Indexing(anyhow::anyhow!(
-                "Index directory {} not found",
+                "index root does not exist: {}",
                 root.display()
             )));
         }
 
         let spinner_guard = feedback.spinner_guard();
-        let indexed_files = matrix.index().await.map_err(|e| {
-            HydraCliError::Indexing(anyhow::anyhow!(
-                "Failed to index directory {}: {}",
-                root.display(),
-                e
-            ))
-        })?;
+        let indexed_files = matrix.index().await.map_err(HydraCliError::Indexing)?;
         drop(spinner_guard);
         progress_bar.set_current(100);
         progress_bar.set_message(format!("Indexed {} files", indexed_files));
@@ -815,13 +805,10 @@ impl CommandHandler {
 
         feedback.success_message("Indexing completed successfully".to_string());
 
-        matrix.save_index(output).await.map_err(|e| {
-            HydraCliError::Io(std::io::Error::other(format!(
-                "Failed to write index to {}: {}",
-                output.display(),
-                e
-            )))
-        })?;
+        matrix
+            .save_index(output)
+            .await
+            .map_err(HydraCliError::Indexing)?;
 
         println!("Code index saved to: {}", output.display());
         println!("Indexing completed in {}ms", context.elapsed_ms());
@@ -831,28 +818,33 @@ impl CommandHandler {
     async fn js(&self, code: &str, feedback: &mut CliFeedback) -> Result<(), HydraCliError> {
         feedback.start_spinner("Executing JavaScript".to_string());
         feedback.update_spinner("Starting sandbox".to_string());
+
+        // Security: Log JavaScript execution attempt
+        tracing::debug!(
+            code_length = code.len(),
+            "Security: JavaScript sandbox execution initiated"
+        );
+
         let spinner_guard = feedback.spinner_guard();
         let mut sandbox = match Sandbox::new() {
             Ok(sandbox) => sandbox,
             Err(error) => {
-                return Err(HydraCliError::JavaScript(anyhow::anyhow!(
-                    "Failed to create sandbox: {error}"
-                )));
+                tracing::warn!("Security: Failed to create JavaScript sandbox");
+                return Err(HydraCliError::JavaScript(error));
             }
         };
 
         let context = ErrorContext::new("javascript_execution");
         println!("Executing JavaScript code in sandbox...");
 
-        let sandbox_result = sandbox.execute(code).await.map_err(|error| {
-            HydraCliError::JavaScript(anyhow::anyhow!("JavaScript execution failed: {}", error))
-        })?;
+        let sandbox_result = sandbox
+            .execute(code)
+            .await
+            .map_err(HydraCliError::JavaScript)?;
         drop(spinner_guard);
         println!("Execution result: {:?}", sandbox_result);
         println!("Execution completed in {}ms", context.elapsed_ms());
-        sandbox.cleanup().await.map_err(|error| {
-            HydraCliError::JavaScript(anyhow::anyhow!("Failed to clean up sandbox: {}", error))
-        })?;
+        sandbox.cleanup().await.map_err(HydraCliError::JavaScript)?;
         Ok(())
     }
 
@@ -935,7 +927,7 @@ impl CommandHandler {
         feedback.start_spinner("Partitioning workspace AST dependencies...".to_string());
 
         let partitioner = crate::partitioner::AstSplitter::from_workspace(root)
-            .map_err(|e| HydraCliError::TaskExecution(anyhow::anyhow!("Failed to initialize AST partitioner: {e}")))?;
+            .map_err(HydraCliError::TaskExecution)?;
 
         // Find candidate project files to partition
         let mut target_files = Vec::new();
@@ -944,7 +936,10 @@ impl CommandHandler {
             if let Ok(entries) = std::fs::read_dir(&src_dir) {
                 for entry in entries.flatten() {
                     let p = entry.path();
-                    if p.extension().map(|e| e == "rs" || e == "js" || e == "ts").unwrap_or(false) {
+                    if p.extension()
+                        .map(|e| e == "rs" || e == "js" || e == "ts")
+                        .unwrap_or(false)
+                    {
                         target_files.push(p);
                     }
                 }
@@ -954,8 +949,10 @@ impl CommandHandler {
             target_files.push(root.join("src/lib.rs"));
         }
 
-        let partitions = partitioner.partition_workspace(&target_files, concurrency).await
-            .map_err(|e| HydraCliError::TaskExecution(anyhow::anyhow!("AST Partitioning failed: {e}")))?;
+        let partitions = partitioner
+            .partition_workspace(&target_files, concurrency)
+            .await
+            .map_err(HydraCliError::TaskExecution)?;
 
         feedback.update_spinner(format!("Spawned {} workspace partitions", partitions.len()));
 
@@ -978,16 +975,27 @@ impl CommandHandler {
                     crate::orchestrator::SwarmEvent::DiffReady { partition_id, diff } => {
                         println!("  [{partition_id}] Diff generated ({} bytes)", diff.len());
                     }
-                    crate::orchestrator::SwarmEvent::TestCompleted { partition_id, passed, .. } => {
+                    crate::orchestrator::SwarmEvent::TestCompleted {
+                        partition_id,
+                        passed,
+                        ..
+                    } => {
                         println!("  [{partition_id}] Test execution passed: {passed}");
                     }
-                    crate::orchestrator::SwarmEvent::ReviewCompleted { partition_id, approved, .. } => {
+                    crate::orchestrator::SwarmEvent::ReviewCompleted {
+                        partition_id,
+                        approved,
+                        ..
+                    } => {
                         println!("  [{partition_id}] Audit review approved: {approved}");
                     }
                     crate::orchestrator::SwarmEvent::ConsensusReached { partition_id } => {
                         println!("  [{partition_id}] Unanimous consensus reached!");
                     }
-                    crate::orchestrator::SwarmEvent::PartitionFailed { partition_id, error } => {
+                    crate::orchestrator::SwarmEvent::PartitionFailed {
+                        partition_id,
+                        error,
+                    } => {
                         eprintln!("  [{partition_id}] FAILED: {error}");
                     }
                     _ => {}
@@ -995,15 +1003,17 @@ impl CommandHandler {
             }
         });
 
-        let results = orchestrator.run_swarm(root, intent, partitions, tx).await
-            .map_err(|e| HydraCliError::TaskExecution(anyhow::anyhow!("Swarm execution failed: {e}")))?;
+        let results = orchestrator
+            .run_swarm(root, intent, partitions, tx)
+            .await
+            .map_err(HydraCliError::TaskExecution)?;
 
         let _ = feedback_printer.await;
         feedback.stop_spinner();
 
         let diffs: Vec<String> = results.into_iter().map(|(_, d)| d).collect();
         let unified_patch = crate::consolidator::Consolidator::reconcile_diffs(&diffs)
-            .map_err(|e| HydraCliError::TaskExecution(anyhow::anyhow!("Diff consolidation failed: {e}")))?;
+            .map_err(HydraCliError::TaskExecution)?;
 
         if unified_patch.is_empty() {
             feedback.info_message("Swarm completed with no modifications required.".to_string());
@@ -1017,13 +1027,17 @@ impl CommandHandler {
         Ok(())
     }
 
-    async fn doc(&self, action: &DocAction, feedback: &mut CliFeedback) -> Result<(), HydraCliError> {
+    async fn doc(
+        &self,
+        action: &DocAction,
+        feedback: &mut CliFeedback,
+    ) -> Result<(), HydraCliError> {
         match action {
             DocAction::Init { root, profile } => {
                 let profiles_dir = root.join("docs").join("profiles");
                 tokio::fs::create_dir_all(&profiles_dir)
                     .await
-                    .map_err(|e| HydraCliError::Configuration(e.into()))?;
+                    .map_err(|error| HydraCliError::Configuration(error.into()))?;
 
                 let profile_file = profiles_dir.join(format!("{}.toml", profile));
                 if !profile_file.exists() {
@@ -1046,7 +1060,7 @@ cache_strategy = "memory-hash-diff"
                     );
                     tokio::fs::write(&profile_file, default_profile_content)
                         .await
-                        .map_err(|e| HydraCliError::Configuration(e.into()))?;
+                        .map_err(|error| HydraCliError::Configuration(error.into()))?;
                 }
 
                 feedback.success_message(format!(
@@ -1058,13 +1072,16 @@ cache_strategy = "memory-hash-diff"
             DocAction::Check { root } => {
                 let root_readme = root.join("README.md");
                 if !root_readme.exists() {
-                    feedback.warning_message("Missing root navigation hub (README.md)!".to_string());
-                    return Err(HydraCliError::Configuration(anyhow::anyhow!("Missing README.md")));
+                    feedback
+                        .warning_message("Missing root navigation hub (README.md)!".to_string());
+                    return Err(HydraCliError::Configuration(anyhow::anyhow!(
+                        "root README.md is missing"
+                    )));
                 }
 
                 let content = tokio::fs::read_to_string(&root_readme)
                     .await
-                    .map_err(|e| HydraCliError::Configuration(e.into()))?;
+                    .map_err(|error| HydraCliError::Configuration(error.into()))?;
 
                 let mut checked_links = 0usize;
                 let mut broken_links = 0usize;
@@ -1077,7 +1094,9 @@ cache_strategy = "memory-hash-diff"
                                 checked_links += 1;
                                 let target_path = root.join(target);
                                 if !target_path.exists() {
-                                    feedback.warning_message(format!("Broken documentation link: {target}"));
+                                    feedback.warning_message(format!(
+                                        "Broken documentation link: {target}"
+                                    ));
                                     broken_links += 1;
                                 }
                             }
@@ -1089,7 +1108,9 @@ cache_strategy = "memory-hash-diff"
                     feedback.warning_message(format!(
                         "Doc check completed: {checked_links} links validated, {broken_links} broken link(s) detected!"
                     ));
-                    Err(HydraCliError::Configuration(anyhow::anyhow!("Broken doc links detected")))
+                    Err(HydraCliError::Configuration(anyhow::anyhow!(
+                        "broken documentation links detected"
+                    )))
                 } else {
                     feedback.success_message(format!(
                         "Doc check passed! {checked_links} internal cross-links validated successfully with zero broken links."
@@ -1110,11 +1131,16 @@ cache_strategy = "memory-hash-diff"
                         let path = entry.path();
                         if path.is_dir() {
                             let readme = path.join("README.md");
-                            let crate_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                            let crate_name = path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("unknown")
+                                .to_string();
                             let exists = readme.exists();
+                            let readme_path = format!("crates/{}/README.md", crate_name);
                             crates_list.push(serde_json::json!({
                                 "crate": crate_name,
-                                "readme": format!("crates/{}/README.md", path.file_name().unwrap().to_string_lossy()),
+                                "readme": readme_path,
                                 "exists": exists,
                                 "status": if exists { "verified" } else { "missing" },
                             }));
@@ -1129,9 +1155,11 @@ cache_strategy = "memory-hash-diff"
                     "crates": crates_list,
                 });
 
-                tokio::fs::write(&index_path, serde_json::to_string_pretty(&doc_index).unwrap_or_default())
+                let json_content = serde_json::to_string_pretty(&doc_index)
+                    .map_err(|error| HydraCliError::Configuration(error.into()))?;
+                tokio::fs::write(&index_path, json_content)
                     .await
-                    .map_err(|e| HydraCliError::Configuration(e.into()))?;
+                    .map_err(|error| HydraCliError::Configuration(error.into()))?;
 
                 feedback.success_message(format!(
                     "Generated documentation traceability index at {}",
@@ -1142,13 +1170,19 @@ cache_strategy = "memory-hash-diff"
             DocAction::Status { root } => {
                 let mut table = Vec::new();
                 table.push("### DOCUMENTATION HIERARCHY HEALTH STATUS".to_string());
-                table.push("| Subsystem / Crate | README Status | Format | Density Standard |".to_string());
+                table.push(
+                    "| Subsystem / Crate | README Status | Format | Density Standard |".to_string(),
+                );
                 table.push("|---|---|---|---|".to_string());
 
                 let root_readme = root.join("README.md");
                 table.push(format!(
                     "| Root Navigation Hub | {} | Markdown | AI-Dense Navigation |",
-                    if root_readme.exists() { "PRESENT" } else { "MISSING" }
+                    if root_readme.exists() {
+                        "PRESENT"
+                    } else {
+                        "MISSING"
+                    }
                 ));
 
                 let crates_dir = root.join("crates");
@@ -1156,7 +1190,11 @@ cache_strategy = "memory-hash-diff"
                     while let Ok(Some(entry)) = entries.next_entry().await {
                         let path = entry.path();
                         if path.is_dir() {
-                            let crate_name = path.file_name().unwrap_or_default().to_string_lossy().to_string();
+                            let crate_name = path
+                                .file_name()
+                                .and_then(|name| name.to_str())
+                                .unwrap_or("unknown")
+                                .to_string();
                             let readme = path.join("README.md");
                             let exists = readme.exists();
                             table.push(format!(
@@ -1175,21 +1213,36 @@ cache_strategy = "memory-hash-diff"
     }
 
     /// Runs multi-toolchain gates and prints telemetry efficiency benchmark.
-    async fn benchmark(&self, root: &Path, feedback: &mut CliFeedback) -> Result<(), HydraCliError> {
-        feedback.info_message("Running multi-toolchain gates and collecting benchmark telemetry...".to_string());
+    async fn benchmark(
+        &self,
+        root: &Path,
+        feedback: &mut CliFeedback,
+    ) -> Result<(), HydraCliError> {
+        feedback.info_message(
+            "Running multi-toolchain gates and collecting benchmark telemetry...".to_string(),
+        );
 
         let reports = crate::toolchains::MultiToolchainGate::run_checks(root).await;
         let mut passed_count = 0;
         for rep in &reports {
             if rep.passed {
                 passed_count += 1;
-                feedback.success_message(format!("Toolchain [{}] passed check", rep.toolchain.name()));
+                feedback
+                    .success_message(format!("Toolchain [{}] passed check", rep.toolchain.name()));
             } else {
-                feedback.warning_message(format!("Toolchain [{}] diagnostics: {}", rep.toolchain.name(), rep.output));
+                feedback.warning_message(format!(
+                    "Toolchain [{}] diagnostics: {}",
+                    rep.toolchain.name(),
+                    rep.output
+                ));
             }
         }
         if !reports.is_empty() {
-            feedback.info_message(format!("Toolchains verified: {}/{} passed.", passed_count, reports.len()));
+            feedback.info_message(format!(
+                "Toolchains verified: {}/{} passed.",
+                passed_count,
+                reports.len()
+            ));
         }
 
         let metrics = crate::toolchains::BenchmarkMetrics {
@@ -1211,13 +1264,20 @@ cache_strategy = "memory-hash-diff"
     }
 
     /// Binds TCP server for JSON-RPC 2.0 streaming interface.
-    async fn daemon(&self, bind_addr: &str, feedback: &mut CliFeedback) -> Result<(), HydraCliError> {
-        feedback.success_message(format!("Hydra Headless Engine Daemon listening on {bind_addr}"));
-        feedback.info_message("Ready for GUI/frontend JSON-RPC IPC streaming connections.".to_string());
+    async fn daemon(
+        &self,
+        bind_addr: &str,
+        feedback: &mut CliFeedback,
+    ) -> Result<(), HydraCliError> {
+        feedback.success_message(format!(
+            "Hydra Headless Engine Daemon listening on {bind_addr}"
+        ));
+        feedback
+            .info_message("Ready for GUI/frontend JSON-RPC IPC streaming connections.".to_string());
 
         crate::daemon::run_daemon_server(bind_addr)
             .await
-            .map_err(|e| HydraCliError::TaskExecution(anyhow::anyhow!("Daemon error on {bind_addr}: {e}")))?;
+            .map_err(HydraCliError::TaskExecution)?;
 
         Ok(())
     }

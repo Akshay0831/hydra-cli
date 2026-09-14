@@ -66,15 +66,22 @@ impl RetryStateStore {
         Ok(state)
     }
 
-    /// Save retry state atomically.
+    /// Save retry state atomically with a same-directory temporary file.
     pub fn save(path: &Path, state: &RetryState) -> Result<()> {
         let serialized = serde_json::to_string_pretty(state)
             .map_err(|e| anyhow::anyhow!("failed to serialize retry state: {}", e))?;
 
-        // Write to temporary file, then rename for atomicity
+        // Same-directory rename prevents partial state files after a crash.
+        tracing::debug!(path = %path.display(), "Saving retry state to persistent storage");
         let temp_file = NamedTempFile::new_in(path.parent().unwrap_or_else(|| Path::new(".")))?;
         fs::write(temp_file.path(), serialized.as_bytes())?;
-        temp_file.persist(path)?;
+        temp_file.persist(path).map_err(|e| {
+            anyhow::anyhow!(
+                "failed to persist retry state to {}: {}",
+                path.display(),
+                e.error
+            )
+        })?;
 
         Ok(())
     }

@@ -18,6 +18,7 @@ async-trait = { workspace = true }
 walkdir = "2.3"
 glob = "0.3"
 ignore = "0.4"
+tracing = { workspace = true }
 rusqlite = { workspace = true }
 
 [dev-dependencies]

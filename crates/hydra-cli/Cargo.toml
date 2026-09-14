@@ -21,6 +21,7 @@ async-trait = { workspace = true }
 rand = "0.8"
 thiserror = "1.0"
 tempfile = { workspace = true }
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

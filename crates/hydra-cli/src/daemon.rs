@@ -1,16 +1,16 @@
 //! Headless daemon with JSON-RPC 2.0 streaming interface and instant cancellation.
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
-use tokio::sync::{watch, Mutex, RwLock};
+use tokio::sync::{Mutex, RwLock, watch};
 
 use crate::orchestrator::steering::{DecisionBrief, DecisionOption, DecisionSeam};
 
-    /// Cooperative cancellation token hierarchy with instant cancellation.
+/// Cooperative cancellation token hierarchy with instant cancellation.
 #[derive(Clone, Debug)]
 pub struct CancellationToken {
     sender: Arc<watch::Sender<bool>>,
@@ -204,14 +204,13 @@ impl DaemonState {
 }
 
 /// Dispatches JSON-RPC requests to internal daemon handlers.
-pub async fn dispatch_json_rpc(
-    state: &Arc<DaemonState>,
-    req: JsonRpcRequest,
-) -> JsonRpcResponse {
+pub async fn dispatch_json_rpc(state: &Arc<DaemonState>, req: JsonRpcRequest) -> JsonRpcResponse {
     let id = req.id.clone();
     match req.method.as_str() {
         "swarm.start" => {
-            let task_id = req.params.get("task_id")
+            let task_id = req
+                .params
+                .get("task_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("default_task")
                 .to_string();
@@ -228,7 +227,9 @@ pub async fn dispatch_json_rpc(
             }
         }
         "swarm.cancel" => {
-            let task_id = req.params.get("task_id")
+            let task_id = req
+                .params
+                .get("task_id")
                 .and_then(|v| v.as_str())
                 .unwrap_or("default_task");
             let cancelled = state.cancel_task(task_id).await;
@@ -243,8 +244,16 @@ pub async fn dispatch_json_rpc(
             }
         }
         "decision.respond" => {
-            let dec_id = req.params.get("decision_id").and_then(|v| v.as_str()).unwrap_or_default();
-            let choice_id = req.params.get("option_id").and_then(|v| v.as_str()).unwrap_or_default();
+            let dec_id = req
+                .params
+                .get("decision_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let choice_id = req
+                .params
+                .get("option_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
 
             let pending = state.pending_decisions.read().await;
             if let Some(brief) = pending.get(dec_id) {
@@ -285,7 +294,11 @@ pub async fn dispatch_json_rpc(
             }
         }
         "diff.preview" => {
-            let part_id = req.params.get("partition_id").and_then(|v| v.as_str()).unwrap_or_default();
+            let part_id = req
+                .params
+                .get("partition_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
             let diffs = state.diff_cache.read().await;
             let diff = diffs.get(part_id).cloned().unwrap_or_default();
             JsonRpcResponse {
@@ -322,7 +335,14 @@ pub async fn dispatch_json_rpc(
 
 /// Runs the streaming headless daemon server over TCP (Phase 5.1 & 5.2).
 pub async fn run_daemon_server(bind_addr: &str) -> Result<()> {
-    let listener = TcpListener::bind(bind_addr).await
+    let address: std::net::SocketAddr = bind_addr
+        .parse()
+        .map_err(|_| anyhow!("daemon requires an explicit loopback socket address"))?;
+    if !address.ip().is_loopback() {
+        anyhow::bail!("daemon refuses non-loopback address {bind_addr}");
+    }
+    let listener = TcpListener::bind(address)
+        .await
         .map_err(|e| anyhow!("Failed to bind daemon on {bind_addr}: {e}"))?;
     let state = Arc::new(DaemonState::new());
 
@@ -346,6 +366,9 @@ pub async fn handle_client_connection(
     let mut line = String::new();
 
     while buf_reader.read_line(&mut line).await? > 0 {
+        if line.len() > 1024 * 1024 {
+            anyhow::bail!("daemon request exceeds 1 MiB");
+        }
         let trimmed = line.trim();
         if !trimmed.is_empty() {
             if let Ok(req) = serde_json::from_str::<JsonRpcRequest>(trimmed) {
@@ -429,7 +452,10 @@ mod tests {
             params: serde_json::json!({ "task_id": "task-42" }),
         };
         let cancel_resp = dispatch_json_rpc(&state, cancel_req).await;
-        assert_eq!(cancel_resp.result.unwrap().get("status").unwrap(), "cancelled");
+        assert_eq!(
+            cancel_resp.result.unwrap().get("status").unwrap(),
+            "cancelled"
+        );
     }
 
     #[tokio::test]
@@ -464,7 +490,10 @@ mod tests {
         };
         let resp = dispatch_json_rpc(&state, diff_req).await;
         assert!(resp.error.is_none());
-        assert_eq!(resp.result.unwrap().get("diff").unwrap(), "--- a.rs\n+++ a.rs\n");
+        assert_eq!(
+            resp.result.unwrap().get("diff").unwrap(),
+            "--- a.rs\n+++ a.rs\n"
+        );
 
         // unknown method
         let unknown_req = JsonRpcRequest {

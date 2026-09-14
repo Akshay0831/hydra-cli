@@ -74,10 +74,10 @@ impl TaskGraphBuilder {
         self.tasks.insert(id, task);
 
         // Update capacity hint based on current size
-        if let Some(capacity) = &mut self.capacity_hint {
-            if self.tasks.len() > *capacity {
-                *capacity = self.tasks.len() * 2; // Double capacity
-            }
+        if let Some(capacity) = &mut self.capacity_hint
+            && self.tasks.len() > *capacity
+        {
+            *capacity = self.tasks.len() * 2; // Double capacity
         }
 
         Ok(self)

@@ -1,7 +1,41 @@
 use anyhow::Result;
 use rquickjs::{Context, Runtime};
 use serde::{Deserialize, Serialize};
+use std::sync::LazyLock;
 use std::time::Instant;
+
+/// Compiled console-access pattern reused across sandbox executions.
+static CONSOLE_RE: LazyLock<regex::Regex> =
+    LazyLock::new(|| regex::Regex::new(r"(?i)\bconsole\s*\.").expect("valid regex"));
+
+/// Compiled module-loading patterns covering ES and CommonJS forms.
+static MODULE_RES: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+    let patterns = [
+        r#"import\s+["']"#,
+        r#"require\s*\("#,
+        r#"from\s+["']"#,
+        r#"module\.exports"#,
+        r#"global\."#,
+    ];
+    patterns
+        .iter()
+        .map(|p| regex::Regex::new(p).expect("valid module regex"))
+        .collect()
+});
+
+/// Compiled network and filesystem patterns used for audit logging.
+static NETWORK_AUDIT_RES: LazyLock<Vec<regex::Regex>> = LazyLock::new(|| {
+    let patterns = [
+        r#"require\s*\("#,
+        r#"import\s+"#,
+        r#"fetch\s*[\(`]"#,
+        r#"XMLHttpRequest"#,
+    ];
+    patterns
+        .iter()
+        .map(|p| regex::Regex::new(p).expect("valid network audit regex"))
+        .collect()
+});
 
 /// JavaScript/TypeScript sandbox using rquickjs runtime.
 pub struct Sandbox {
@@ -56,7 +90,7 @@ pub enum SandboxErrorKind {
 }
 
 impl Sandbox {
-    /// Create a new JavaScript sandbox with default configuration
+    /// Create a sandbox with default configuration and security logging.
     pub fn new() -> Result<Self> {
         Self::with_config(SandboxConfig::default())
     }
@@ -76,24 +110,50 @@ impl Sandbox {
         })
     }
 
-    /// Execute JavaScript code in the sandbox
+    /// Execute JavaScript after policy checks and audit logging.
     pub async fn execute(&mut self, code: &str) -> Result<SandboxResult> {
         let start_time = Instant::now();
         let mut errors = Vec::new();
 
-        if !self.config.enable_console && code.contains("console.") {
+        tracing::debug!(code_length = code.len(), "JavaScript execution started");
+
+        // Block console access if disabled (single compiled regex, no per-call cost)
+        if !self.config.enable_console && CONSOLE_RE.is_match(code) {
+            tracing::warn!(code_length = code.len(), "Blocked console access attempt");
             return Ok(self.error_result(
                 "console access is disabled",
                 SandboxErrorKind::Policy,
                 start_time,
             ));
         }
-        if !self.config.enable_modules && (code.contains("import ") || code.contains("require(")) {
-            return Ok(self.error_result(
-                "module loading is disabled",
-                SandboxErrorKind::Policy,
-                start_time,
-            ));
+
+        // Audit-log any network/FS pattern matches regardless of module setting
+        for re in NETWORK_AUDIT_RES.iter() {
+            if re.is_match(code) {
+                tracing::warn!(
+                    code_length = code.len(),
+                    pattern = re.as_str(),
+                    "Potentially dangerous operation detected"
+                );
+            }
+        }
+
+        // Block module loading if disabled
+        if !self.config.enable_modules {
+            for re in MODULE_RES.iter() {
+                if re.is_match(code) {
+                    tracing::warn!(
+                        code_length = code.len(),
+                        pattern = re.as_str(),
+                        "Blocked module loading attempt"
+                    );
+                    return Ok(self.error_result(
+                        "module loading is disabled",
+                        SandboxErrorKind::Policy,
+                        start_time,
+                    ));
+                }
+            }
         }
 
         match self.execute_sync(code) {
@@ -214,7 +274,8 @@ impl MemoryVfs {
 
     /// Stages a file content update in memory.
     pub fn stage_file(&mut self, path: impl AsRef<Path>, content: impl Into<String>) {
-        self.staged_files.insert(path.as_ref().to_path_buf(), content.into());
+        self.staged_files
+            .insert(path.as_ref().to_path_buf(), content.into());
     }
 
     /// Reads staged file content from memory.
@@ -236,13 +297,14 @@ impl MemoryVfs {
                     }
                     ')' => {
                         if stack.pop() != Some('(') {
-                            return Err(format!("Unmatched closing parenthesis ')' at char {}", idx));
+                            return Err(format!(
+                                "Unmatched closing parenthesis ')' at char {}",
+                                idx
+                            ));
                         }
                     }
-                    ']' => {
-                        if stack.pop() != Some('[') {
-                            return Err(format!("Unmatched closing bracket ']' at char {}", idx));
-                        }
+                    ']' if stack.pop() != Some('[') => {
+                        return Err(format!("Unmatched closing bracket ']' at char {}", idx));
                     }
                     _ => {}
                 }
@@ -258,11 +320,40 @@ impl MemoryVfs {
 
     /// Commits all staged VFS files to physical disk.
     pub fn commit_to_disk(&self, base_path: impl AsRef<Path>) -> Result<usize> {
+        let base_path = base_path.as_ref().canonicalize()?;
         let mut count = 0;
         for (rel_path, content) in &self.staged_files {
-            let full_path = base_path.as_ref().join(rel_path);
+            if rel_path.is_absolute()
+                || rel_path
+                    .components()
+                    .any(|component| component == std::path::Component::ParentDir)
+            {
+                anyhow::bail!("staged path must remain relative to the VFS root");
+            }
+
+            let full_path = base_path.join(rel_path);
             if let Some(parent) = full_path.parent() {
+                for component in parent.strip_prefix(&base_path)?.components() {
+                    let candidate = base_path.join(component);
+                    if candidate.exists()
+                        && std::fs::symlink_metadata(&candidate)?
+                            .file_type()
+                            .is_symlink()
+                    {
+                        anyhow::bail!("staged path contains a symbolic link");
+                    }
+                }
                 std::fs::create_dir_all(parent)?;
+                if parent.canonicalize()?.strip_prefix(&base_path).is_err() {
+                    anyhow::bail!("staged path escapes the VFS root");
+                }
+            }
+            if full_path.exists()
+                && std::fs::symlink_metadata(&full_path)?
+                    .file_type()
+                    .is_symlink()
+            {
+                anyhow::bail!("refusing to overwrite a symbolic link");
             }
             std::fs::write(&full_path, content)?;
             count += 1;
@@ -375,6 +466,16 @@ mod tests {
         let written = vfs.commit_to_disk(tmp.path()).unwrap();
         assert_eq!(written, 1);
         assert!(tmp.path().join("src/test.rs").exists());
+    }
+
+    #[test]
+    fn test_memory_vfs_rejects_escape_paths() {
+        let mut vfs = MemoryVfs::new();
+        vfs.stage_file("../outside.txt", "blocked");
+        let tmp = tempfile::tempdir().unwrap();
+
+        assert!(vfs.commit_to_disk(tmp.path()).is_err());
+        assert!(!tmp.path().parent().unwrap().join("outside.txt").exists());
     }
 
     #[test]

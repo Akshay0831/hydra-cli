@@ -190,22 +190,21 @@ mod parsers {
                             Vec::new(),
                         ));
                     }
-                } else if declaration.starts_with("enum ") {
-                    if let Some(name) = declaration
+                } else if declaration.starts_with("enum ")
+                    && let Some(name) = declaration
                         .strip_prefix("enum ")
                         .and_then(|value| value.split('{').next())
                         .map(str::trim)
                         .filter(|name| !name.is_empty())
-                    {
-                        elements.push(make_element(
-                            file_path,
-                            line_num + 1,
-                            ElementType::Enum,
-                            name.to_string(),
-                            line,
-                            Vec::new(),
-                        ));
-                    }
+                {
+                    elements.push(make_element(
+                        file_path,
+                        line_num + 1,
+                        ElementType::Enum,
+                        name.to_string(),
+                        line,
+                        Vec::new(),
+                    ));
                 }
             }
 
@@ -217,15 +216,14 @@ mod parsers {
 
             // Simple use statement extraction
             for line in content.lines() {
-                if line.trim().starts_with("use ") {
-                    if let Some(dep) = line
+                if line.trim().starts_with("use ")
+                    && let Some(dep) = line
                         .trim()
                         .strip_prefix("use ")
                         .map(|value| value.trim_end_matches(';').trim())
                         .filter(|dep| !dep.is_empty())
-                    {
-                        dependencies.push(dep.to_string());
-                    }
+                {
+                    dependencies.push(dep.to_string());
                 }
             }
 
@@ -505,7 +503,10 @@ impl CodeMatrix {
     /// Calculate blast radius (Phase 6.2):
     /// Returns all 1-hop and 2-hop impacted symbols, files, and callers
     /// if a given target symbol or file changes.
-    pub async fn calculate_blast_radius(&self, target_symbol_or_path: &str) -> Result<HashSet<PathBuf>> {
+    pub async fn calculate_blast_radius(
+        &self,
+        target_symbol_or_path: &str,
+    ) -> Result<HashSet<PathBuf>> {
         let index = self.index.read().await;
         let mut impacted_files = HashSet::new();
         let mut direct_dependent_symbols = HashSet::new();
@@ -514,7 +515,10 @@ impl CodeMatrix {
         for element in index.values() {
             if element.name == target_symbol_or_path
                 || element.id.contains(target_symbol_or_path)
-                || element.file_path.to_string_lossy().contains(target_symbol_or_path)
+                || element
+                    .file_path
+                    .to_string_lossy()
+                    .contains(target_symbol_or_path)
             {
                 impacted_files.insert(element.file_path.clone());
                 direct_dependent_symbols.insert(element.name.clone());
@@ -740,9 +744,10 @@ fn sort_elements(mut elements: Vec<CodeElement>) -> Vec<CodeElement> {
 // ---------------------------------------------------------------------------
 
 /// Strategy used for extracting and loading context.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ContextStrategyKind {
     /// Strips function bodies and internal logic; extracts signatures and doc invariants.
+    #[default]
     ASTSkeleton,
     /// Multi-signal ranking based on distance, relevance, and references.
     RelevanceScored,
@@ -750,12 +755,6 @@ pub enum ContextStrategyKind {
     SliceWindow,
     /// Ingests directory/crate documentation tables and rules.
     DenseDoc,
-}
-
-impl Default for ContextStrategyKind {
-    fn default() -> Self {
-        Self::ASTSkeleton
-    }
 }
 
 /// Cached entry in memory to avoid repetitive reads.
@@ -869,7 +868,7 @@ impl ContextLoader {
                 || trimmed.starts_with("async fn ")
             {
                 if let Some(pos) = line.find('{') {
-                    out.push(format!("{} {{ /* ... */ }}", &line[..pos].trim_end()));
+                    out.push(format!("{} {{ /* ... */ }}", line[..pos].trim_end()));
                 } else if line.ends_with(';') {
                     out.push(line.to_string());
                 } else {
@@ -921,7 +920,7 @@ impl ContextLoader {
                 || trimmed.starts_with("async function ")
             {
                 if let Some(pos) = line.find('{') {
-                    out.push(format!("{} {{ /* ... */ }}", &line[..pos].trim_end()));
+                    out.push(format!("{} {{ /* ... */ }}", line[..pos].trim_end()));
                 } else {
                     out.push(format!("{} {{ /* ... */ }}", line.trim_end()));
                 }
@@ -1004,16 +1003,18 @@ impl ContextLoader {
         // 2. Code skeleton or content with memory caching
         if target_path.is_file() {
             result.source_paths.push(target_path.to_path_buf());
-            let file_str = tokio::fs::read_to_string(target_path).await.unwrap_or_default();
+            let file_str = tokio::fs::read_to_string(target_path)
+                .await
+                .unwrap_or_default();
             let current_hash = Self::hash_content(&file_str);
 
             let mut cache = self.cache.write().await;
-            if let Some(entry) = cache.get(target_path) {
-                if entry.content_hash == current_hash {
-                    result.code_skeleton = entry.extracted_content.clone();
-                    result.estimated_tokens = entry.token_estimate;
-                    return Ok(result);
-                }
+            if let Some(entry) = cache.get(target_path)
+                && entry.content_hash == current_hash
+            {
+                result.code_skeleton = entry.extracted_content.clone();
+                result.estimated_tokens = entry.token_estimate;
+                return Ok(result);
             }
 
             let ext = target_path
@@ -1068,19 +1069,20 @@ impl IncrementalWatcher {
         let target_files = matrix.get_target_files()?;
 
         for file in target_files {
-            if let Ok(metadata) = tokio::fs::metadata(&file).await {
-                if let Ok(mtime) = metadata.modified() {
-                    let should_reindex = match self.last_mtimes.get(&file) {
-                        Some(&prev) => mtime > prev,
-                        None => true,
-                    };
+            if let Ok(metadata) = tokio::fs::metadata(&file).await
+                && let Ok(mtime) = metadata.modified()
+            {
+                let should_reindex = match self.last_mtimes.get(&file) {
+                    Some(&prev) => mtime > prev,
+                    None => true,
+                };
 
-                    if should_reindex {
-                        if matrix.should_index_file(&file).await? && matrix.index_file(&file).await? {
-                            reindexed.push(file.clone());
-                            self.last_mtimes.insert(file, mtime);
-                        }
-                    }
+                if should_reindex
+                    && matrix.should_index_file(&file).await?
+                    && matrix.index_file(&file).await?
+                {
+                    reindexed.push(file.clone());
+                    self.last_mtimes.insert(file, mtime);
                 }
             }
         }
@@ -1099,6 +1101,7 @@ impl SqliteIndexCache {
         if let Some(parent) = db_path.parent() {
             std::fs::create_dir_all(parent)?;
         }
+        tracing::debug!(db_path = %db_path.display(), "Security: Opening matrix database");
         let conn = rusqlite::Connection::open(&db_path)?;
         conn.execute_batch(
             "PRAGMA journal_mode = WAL;
@@ -1112,18 +1115,19 @@ impl SqliteIndexCache {
                  content TEXT NOT NULL,
                  dependencies TEXT NOT NULL,
                  metadata TEXT NOT NULL
-             );"
+             );",
         )?;
         Ok(Self { db_path })
     }
 
     pub async fn persist(&self, matrix: &CodeMatrix) -> Result<usize> {
         let index = matrix.index.read().await;
+        tracing::debug!(db_path = %self.db_path.display(), element_count = index.len(), "Security: Persisting matrix database");
         let conn = rusqlite::Connection::open(&self.db_path)?;
         let mut stmt = conn.prepare(
             "INSERT OR REPLACE INTO elements (
                 id, name, element_type, file_path, line_number, content, dependencies, metadata
-            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);"
+            ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8);",
         )?;
 
         let mut count = 0;
@@ -1178,11 +1182,17 @@ impl SqliteIndexCache {
                 "Module" => ElementType::Module,
                 "Constant" => ElementType::Constant,
                 "Import" => ElementType::Import,
-                _ => ElementType::Variable,
+                _ => {
+                    return Err(anyhow::anyhow!(
+                        "Invalid element type in database: {}",
+                        type_str
+                    ));
+                }
             };
 
             let dependencies: Vec<String> = serde_json::from_str(&deps_json).unwrap_or_default();
-            let metadata: HashMap<String, String> = serde_json::from_str(&meta_json).unwrap_or_default();
+            let metadata: HashMap<String, String> =
+                serde_json::from_str(&meta_json).unwrap_or_default();
 
             let el = CodeElement {
                 id: id.clone(),

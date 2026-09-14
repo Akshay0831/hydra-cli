@@ -12,6 +12,8 @@ uuid = { workspace = true }
 rquickjs = { version = "0.12.2", features = ["full", "futures"] }
 serde_json = { workspace = true }
 serde = { workspace = true }
+regex = "1.10"
+tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

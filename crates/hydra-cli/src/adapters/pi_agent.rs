@@ -48,15 +48,47 @@ impl ScopeConstraint {
     /// Validates whether a file write target is permitted within this partition scope.
     pub fn is_write_allowed(&self, target_path: &Path) -> bool {
         if self.allowed_paths.is_empty() {
-            return true;
+            return false; // Default to deny for security
         }
-        self.allowed_paths
-            .iter()
-            .any(|allowed| target_path.starts_with(allowed) || target_path == allowed)
+
+        // Check for absolute paths outside allowed directories
+        if target_path.is_absolute()
+            && !self
+                .allowed_paths
+                .iter()
+                .any(|allowed| target_path.starts_with(allowed))
+        {
+            return false;
+        }
+
+        // Check for path traversal attempts
+        if target_path
+            .components()
+            .any(|c| c == std::path::Component::ParentDir)
+        {
+            tracing::warn!(target_path = ?target_path, "Security: Path traversal attempt detected");
+            return false;
+        }
+
+        // Normalize and check against allowed paths
+        if let Ok(normalized) = target_path.canonicalize() {
+            self.allowed_paths.iter().any(|allowed| {
+                allowed
+                    .canonicalize()
+                    .map(|allowed| normalized.starts_with(&allowed) || normalized == allowed)
+                    .unwrap_or(false)
+            })
+        } else {
+            // Fallback to simple check if canonicalization fails
+            self.allowed_paths
+                .iter()
+                .any(|allowed| target_path.starts_with(allowed) || target_path == *allowed)
+        }
     }
 
     /// Blocks spurious wrapper files; forces module extension.
     pub fn validate_file_creation(&self, proposed_path: &Path) -> Result<(), String> {
+        tracing::debug!(proposed_path = ?proposed_path, "Security: Validating file creation");
         let file_name = proposed_path
             .file_name()
             .and_then(|f| f.to_str())
@@ -79,7 +111,11 @@ impl ScopeConstraint {
         ];
 
         for forbidden in &forbidden_names {
-            if file_name == *forbidden || file_name.ends_with("_utils.rs") || file_name.ends_with("_helper.rs") {
+            if file_name == *forbidden
+                || file_name.ends_with("_utils.rs")
+                || file_name.ends_with("_helper.rs")
+            {
+                tracing::warn!(proposed_path = ?proposed_path, file_name = %file_name, "Security: File creation blocked by anti-duplication policy");
                 return Err(format!(
                     "REJECTED: File creation '{}' blocked by anti-duplication policy. Extend existing module contracts instead of creating generic wrapper files.",
                     proposed_path.display()
@@ -204,10 +240,7 @@ impl AgentAdapter {
             .await?;
 
         let output_text = output_accumulator.lock().await.clone();
-        let touched_files = request
-            .scope
-            .map(|s| s.allowed_paths)
-            .unwrap_or_default();
+        let touched_files = request.scope.map(|s| s.allowed_paths).unwrap_or_default();
 
         Ok(AgentTurnResult {
             output_text,
@@ -259,9 +292,9 @@ mod tests {
     }
 
     #[test]
-    fn test_empty_scope_allows_any_path() {
+    fn test_empty_scope_denies_all_paths() {
         let scope = ScopeConstraint::default();
-        assert!(scope.is_write_allowed(&PathBuf::from("src/anything.rs")));
+        assert!(!scope.is_write_allowed(&PathBuf::from("src/anything.rs")));
     }
 
     #[test]
@@ -282,7 +315,10 @@ mod tests {
 
     #[test]
     fn test_scope_constraint_exact_file_matching() {
-        let scope = ScopeConstraint::new(vec![PathBuf::from("src/main.rs"), PathBuf::from("tests/test.rs")]);
+        let scope = ScopeConstraint::new(vec![
+            PathBuf::from("src/main.rs"),
+            PathBuf::from("tests/test.rs"),
+        ]);
         assert!(scope.is_write_allowed(&PathBuf::from("src/main.rs")));
         assert!(scope.is_write_allowed(&PathBuf::from("tests/test.rs")));
         assert!(!scope.is_write_allowed(&PathBuf::from("src/lib.rs")));
@@ -313,10 +349,25 @@ mod tests {
     #[test]
     fn test_anti_duplication_blocks_generic_helpers() {
         let scope = ScopeConstraint::default();
-        assert!(scope.validate_file_creation(&PathBuf::from("src/utils.rs")).is_err());
-        assert!(scope.validate_file_creation(&PathBuf::from("src/my_helper.rs")).is_err());
-        assert!(scope.validate_file_creation(&PathBuf::from("src/module_utils.rs")).is_err());
-        assert!(scope.validate_file_creation(&PathBuf::from("src/ast_parser.rs")).is_ok());
+        assert!(
+            scope
+                .validate_file_creation(&PathBuf::from("src/utils.rs"))
+                .is_err()
+        );
+        assert!(
+            scope
+                .validate_file_creation(&PathBuf::from("src/my_helper.rs"))
+                .is_err()
+        );
+        assert!(
+            scope
+                .validate_file_creation(&PathBuf::from("src/module_utils.rs"))
+                .is_err()
+        );
+        assert!(
+            scope
+                .validate_file_creation(&PathBuf::from("src/ast_parser.rs"))
+                .is_ok()
+        );
     }
 }
-

@@ -106,6 +106,8 @@ hydra-cli
 * **Adapter Seam**: Application code interacts exclusively with Hydra adapter facades (`crates/hydra-cli/src/adapters/`). Direct upstream SDK imports are forbidden.
 * **Submodules Intact**: External submodules (`pi_agent_rust`, `litellm`, `mcp-sdk`) remain 100% clean and untouched; custom logic and role steering reside in Hydra adapters.
 * **Doc Integrity Enforcement**: Run `hydra-cli doc check` to validate internal cross-links and ensure documentation invariants are maintained.
+### Security Boundary
+Hydra validates paths, rejects traversal and unsafe symlink writes, isolates swarm workers in Git worktrees, fails closed when isolation fails, restricts the daemon to loopback, and bounds subprocess time and output. Upstream modules are consumed through Hydra adapters and are not modified. The JavaScript sandbox is an in-process runtime; use an OS-level container or separate worker process when hostile code requires a hard isolation boundary.
 
 ---
 
