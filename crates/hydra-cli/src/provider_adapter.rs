@@ -1,4 +1,4 @@
-//! Provider adapter that bridges Hydra routing decisions with upstream provider execution.
+// Provider adapter bridging routing decisions with upstream execution
 use crate::routing::{Candidate, ResolvedCredential, RoutingConfig, RoutingRequest};
 use anyhow::Result;
 use std::collections::HashSet;

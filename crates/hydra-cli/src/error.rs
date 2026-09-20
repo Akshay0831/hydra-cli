@@ -1,4 +1,4 @@
-//! Error types and retry handling used by Hydra CLI commands.
+// Hydra CLI error types with retry handling
 
 use crate::retry_manager::RetryConfig;
 use thiserror::Error;

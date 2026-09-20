@@ -1,7 +1,4 @@
-//! crates/hydra-cli/src/consolidator/merger.rs
-//!
-//! Log deduplication, feedback ranking, and diff reconciliation engine.
-//! Evaluates consensus among Coder, Tester, and Reviewer outputs.
+// Log deduplication and feedback ranking engine for Coder/Tester/Reviewer consensus
 
 use anyhow::Result;
 use std::collections::{HashMap, HashSet};
@@ -37,7 +34,7 @@ pub struct ConsolidatedFinding {
 pub struct Consolidator;
 
 impl Consolidator {
-    /// Strips repetitive stack traces and extracts actionable compiler diagnostics.
+        /// Strip stack traces and extract compiler diagnostics
     pub fn deduplicate_logs(raw_stderr: &str, raw_stdout: &str) -> Vec<ConsolidatedFinding> {
         let mut findings = Vec::new();
         let mut seen_messages = HashSet::new();
@@ -80,7 +77,7 @@ impl Consolidator {
         findings
     }
 
-    /// Reconcile diffs into unified patch; detect conflicts and merge non-overlapping edits.
+    /// Reconcile diffs into unified patch with conflict detection
     pub fn reconcile_diffs(diffs: &[String]) -> Result<String> {
         let non_empty: Vec<&str> = diffs
             .iter()
@@ -102,8 +99,8 @@ impl Consolidator {
         for diff in &non_empty {
             let mut current_file = String::new();
             for line in diff.lines() {
-                if line.starts_with("+++ b/") {
-                    current_file = line["+++ b/".len()..].trim().to_string();
+                if let Some(rest) = line.strip_prefix("+++ b/") {
+                    current_file = rest.trim().to_string();
                 } else if line.starts_with("@@ -") && !current_file.is_empty() {
                     let parts: Vec<&str> = line.split_whitespace().collect();
                     if parts.len() >= 3 && parts[2].starts_with('+') {
@@ -205,14 +202,13 @@ impl Consolidator {
             }
 
             // Phase 1.2: Single Execution Gateway Enforcer (block new runner/wrapper files)
-            if trimmed.starts_with("+++ b/") {
-                let target = &trimmed[6..];
-                if target.ends_with("_runner.rs") || target.ends_with("_helper.rs") || target.ends_with("_utils.rs") {
-                    return Err(format!(
-                        "REJECTED: Ad-hoc wrapper file '{}' blocked. Route all changes through established Hydra adapter facades.",
-                        target
-                    ));
-                }
+            if let Some(target) = trimmed.strip_prefix("+++ b/")
+                && (target.ends_with("_runner.rs") || target.ends_with("_helper.rs") || target.ends_with("_utils.rs"))
+            {
+                return Err(format!(
+                    "REJECTED: Ad-hoc wrapper file '{}' blocked. Route all changes through established Hydra adapter facades.",
+                    target
+                ));
             }
 
             // Phase 1.3: AST-Level Redundancy & Idiom Scanner

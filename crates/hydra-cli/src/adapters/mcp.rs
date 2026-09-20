@@ -100,11 +100,21 @@ impl McpAdapter {
         ])
     }
 
-    /// Dispatches a tool execution request.
+    /// Dispatches a tool execution request in the current directory.
     pub async fn call_tool(
         &self,
         name: &str,
         params: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        self.call_tool_in_dir(name, params, std::path::Path::new(".")).await
+    }
+
+    /// Dispatches a tool execution request isolated within a specified working directory.
+    pub async fn call_tool_in_dir(
+        &self,
+        name: &str,
+        params: serde_json::Value,
+        working_dir: &std::path::Path,
     ) -> Result<serde_json::Value> {
         match name {
             "cargo_test" => {
@@ -114,6 +124,7 @@ impl McpAdapter {
                 if let Some(p) = pkg {
                     cmd.arg("-p").arg(p);
                 }
+                cmd.current_dir(working_dir);
                 cmd.kill_on_drop(true);
                 let output = tokio::time::timeout(std::time::Duration::from_secs(60), cmd.output())
                     .await
@@ -128,6 +139,7 @@ impl McpAdapter {
             "cargo_check" => {
                 let mut cmd = tokio::process::Command::new("cargo");
                 cmd.arg("check");
+                cmd.current_dir(working_dir);
                 cmd.kill_on_drop(true);
                 let output = tokio::time::timeout(std::time::Duration::from_secs(60), cmd.output())
                     .await

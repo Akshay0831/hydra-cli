@@ -1,17 +1,12 @@
-//! Multi-toolchain verification and telemetry for benchmarking.
+// Multi-toolchain verification and telemetry for benchmarking
 
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-/// Supported build and test toolchains (Phase 8.1).
+/// Supported build and test toolchains (Phase 8.1)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ToolchainKind {
-    Cargo,
-    Npm,
-    Pnpm,
-    Bun,
-    Pytest,
-    Go,
+    Cargo, Npm, Pnpm, Bun, Pytest, Go
 }
 
 impl ToolchainKind {

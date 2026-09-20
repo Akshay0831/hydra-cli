@@ -1,7 +1,4 @@
-//! crates/hydra-cli/src/partitioner/ast_splitter.rs
-//!
-//! Uses AST dependency graphs and tree-sitter indexing to partition the workspace
-//! into disjoint, non-overlapping file scopes for parallel worker execution.
+// AST dependency partitioning using tree-sitter for parallel worker execution scopes
 
 use anyhow::Result;
 use hydra_matrix::{CodeMatrix, IndexConfig};
@@ -10,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-/// A disjoint scope of files allocated to a parallel worker trio.
+/// File scope for parallel worker trio
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FilePartition {
     pub id: String,
@@ -26,7 +23,7 @@ impl FilePartition {
     }
 }
 
-/// AST Workspace partitioner leveraging hydra-matrix.
+/// AST workspace partitioner leveraging hydra-matrix
 pub struct AstSplitter {
     matrix: Arc<CodeMatrix>,
 }
@@ -37,12 +34,17 @@ impl AstSplitter {
     }
 
     /// Convenience constructor creating an indexed CodeMatrix for the workspace root.
-    pub fn from_workspace(root: &Path) -> Result<Self> {
+    ///
+    /// This is async because it runs the full file-system walk and symbol indexing
+    /// pass before returning, so `partition_workspace` gets real search results.
+    pub async fn from_workspace(root: &Path) -> Result<Self> {
         let config = IndexConfig {
             paths: vec![root.to_string_lossy().to_string()],
             ..IndexConfig::default()
         };
-        let matrix = CodeMatrix::with_config(config)?;
+        let mut matrix = CodeMatrix::with_config(config)?;
+        // Run the indexing pass so subsequent `search()` calls return real data.
+        let _ = matrix.index().await;
         Ok(Self {
             matrix: Arc::new(matrix),
         })
@@ -163,14 +165,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_ast_splitter_empty_targets() {
-        let splitter = AstSplitter::from_workspace(Path::new(".")).unwrap();
+        let splitter = AstSplitter::from_workspace(Path::new(".")).await.unwrap();
         let partitions = splitter.partition_workspace(&[], 4).await.unwrap();
         assert!(partitions.is_empty());
     }
 
     #[tokio::test]
     async fn test_ast_splitter_single_target() {
-        let splitter = AstSplitter::from_workspace(Path::new(".")).unwrap();
+        let splitter = AstSplitter::from_workspace(Path::new(".")).await.unwrap();
         let targets = vec![PathBuf::from("src/main.rs")];
         let partitions = splitter.partition_workspace(&targets, 4).await.unwrap();
         assert_eq!(partitions.len(), 1);
@@ -180,7 +182,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_ast_splitter_multiple_targets_balanced() {
-        let splitter = AstSplitter::from_workspace(Path::new(".")).unwrap();
+        let splitter = AstSplitter::from_workspace(Path::new(".")).await.unwrap();
         let targets = vec![
             PathBuf::from("src/adapters/pi_agent.rs"),
             PathBuf::from("src/consolidator/merger.rs"),

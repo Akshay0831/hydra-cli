@@ -1,4 +1,4 @@
-//! Spinner utilities for CLI operations.
+// CLI spinner utilities
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -67,11 +67,10 @@ impl EnhancedSpinner {
         if let Ok(mut running) = self.running.lock() {
             *running = false;
         }
-        if let Ok(mut task) = self.task.lock() {
-            if let Some(handle) = task.take() {
+        if let Ok(mut task) = self.task.lock()
+            && let Some(handle) = task.take() {
                 handle.abort();
             }
-        }
     }
 
     pub fn update_message(&mut self, new_message: String) {

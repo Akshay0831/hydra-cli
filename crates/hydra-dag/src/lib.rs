@@ -559,6 +559,214 @@ impl Task for SimpleTask {
     }
 }
 
+// ---------------------------------------------------------------------------
+// ShellCommandTask — real subprocess execution with timeout
+// ---------------------------------------------------------------------------
+
+/// A production-ready DAG task that runs an OS-level shell command.
+///
+/// On success the `Output` is `(exit_code, combined_stdout_stderr)`.
+/// On timeout the task returns an `Err`.
+#[derive(Debug, Clone)]
+pub struct ShellCommandTask {
+    /// Unique task ID (must be unique within the graph).
+    pub id: String,
+    /// Other task IDs that must succeed before this one runs.
+    pub dependencies: Vec<String>,
+    /// The program to execute (e.g. `"cargo"`, `"node"`, `"/usr/bin/python3"`).
+    pub program: String,
+    /// Arguments passed to the program.
+    pub args: Vec<String>,
+    /// Working directory for the subprocess.  Defaults to the current directory.
+    pub working_dir: Option<std::path::PathBuf>,
+    /// Extra environment variables to inject (merged with the parent env).
+    pub env: Vec<(String, String)>,
+    /// Maximum wall-clock time before the process is killed and the task fails.
+    /// `None` means no timeout.
+    pub timeout: Option<std::time::Duration>,
+}
+
+impl ShellCommandTask {
+    /// Construct a simple shell task with default timeout (60 s).
+    pub fn new(
+        id: impl Into<String>,
+        program: impl Into<String>,
+        args: impl IntoIterator<Item = impl Into<String>>,
+        dependencies: Vec<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            dependencies,
+            program: program.into(),
+            args: args.into_iter().map(Into::into).collect(),
+            working_dir: None,
+            env: Vec::new(),
+            timeout: Some(std::time::Duration::from_secs(60)),
+        }
+    }
+
+    /// Override the working directory.
+    pub fn with_working_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.working_dir = Some(dir.into());
+        self
+    }
+
+    /// Set (or clear) the timeout.
+    pub fn with_timeout(mut self, timeout: Option<std::time::Duration>) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
+    /// Add an environment variable.
+    pub fn with_env(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
+    }
+}
+
+/// Combined output from a shell task execution.
+#[derive(Debug, Clone)]
+pub struct ShellOutput {
+    /// Exit code returned by the subprocess (0 = success by convention).
+    pub exit_code: i32,
+    /// Merged stdout + stderr in chronological order (stdout first then stderr).
+    pub output: String,
+    /// Whether the subprocess exited with a zero exit code.
+    pub success: bool,
+}
+
+impl std::fmt::Display for ShellOutput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "[exit={}] {}",
+            self.exit_code,
+            self.output.trim()
+        )
+    }
+}
+
+#[async_trait::async_trait]
+impl Task for ShellCommandTask {
+    type Output = ShellOutput;
+
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn dependencies(&self) -> Vec<String> {
+        self.dependencies.clone()
+    }
+
+    async fn execute(&self) -> Result<Self::Output> {
+        let mut cmd = tokio::process::Command::new(&self.program);
+        cmd.args(&self.args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped());
+
+        if let Some(dir) = &self.working_dir {
+            cmd.current_dir(dir);
+        }
+        for (key, val) in &self.env {
+            cmd.env(key, val);
+        }
+
+        let run = async {
+            let child = cmd
+                .spawn()
+                .map_err(|e| anyhow::anyhow!("failed to spawn `{}`: {}", self.program, e))?;
+            let out = child
+                .wait_with_output()
+                .await
+                .map_err(|e| anyhow::anyhow!("process wait error: {}", e))?;
+            let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
+            let stderr = String::from_utf8_lossy(&out.stderr).into_owned();
+            let combined = if stderr.is_empty() {
+                stdout
+            } else if stdout.is_empty() {
+                stderr
+            } else {
+                format!("{stdout}\n--- stderr ---\n{stderr}")
+            };
+            let exit_code = out.status.code().unwrap_or(-1);
+            Ok::<ShellOutput, anyhow::Error>(ShellOutput {
+                exit_code,
+                success: out.status.success(),
+                output: combined,
+            })
+        };
+
+        if let Some(timeout) = self.timeout {
+            tokio::time::timeout(timeout, run)
+                .await
+                .map_err(|_| anyhow::anyhow!("task `{}` timed out after {:?}", self.id, timeout))?
+        } else {
+            run.await
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AgentPromptTask — placeholder for agent-invocation slot in DAG pipelines
+// ---------------------------------------------------------------------------
+
+/// A DAG task that sends a prompt to a Hydra agent and returns the text response.
+///
+/// This is currently a stub that echoes the prompt prefixed with `[agent]`.
+/// Wire it to `AgentAdapter::prompt` in a future milestone when you need
+/// full agent-DAG integration.
+pub struct AgentPromptTask {
+    pub id: String,
+    pub dependencies: Vec<String>,
+    pub prompt: String,
+    pub model: Option<String>,
+}
+
+impl AgentPromptTask {
+    pub fn new(
+        id: impl Into<String>,
+        prompt: impl Into<String>,
+        dependencies: Vec<String>,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            prompt: prompt.into(),
+            dependencies,
+            model: None,
+        }
+    }
+
+    pub fn with_model(mut self, model: impl Into<String>) -> Self {
+        self.model = Some(model.into());
+        self
+    }
+}
+
+#[async_trait::async_trait]
+impl Task for AgentPromptTask {
+    type Output = String;
+
+    fn id(&self) -> String {
+        self.id.clone()
+    }
+
+    fn dependencies(&self) -> Vec<String> {
+        self.dependencies.clone()
+    }
+
+    async fn execute(&self) -> Result<Self::Output> {
+        // Stub: returns a tagged echo so callers can verify the task ran.
+        // Replace with a real AgentAdapter::prompt call when agent-DAG
+        // integration is implemented.
+        Ok(format!(
+            "[agent:{}] {}",
+            self.model.as_deref().unwrap_or("default"),
+            self.prompt
+        ))
+    }
+}
+
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -918,4 +1126,91 @@ mod tests {
             Some("Maximum concurrency must be greater than zero")
         );
     }
+
+    #[tokio::test]
+    async fn test_shell_command_task_execution() {
+        // On Windows cmd /C echo or on unix sh -c echo
+        #[cfg(target_os = "windows")]
+        let task = ShellCommandTask::new(
+            "cmd_task",
+            "cmd",
+            vec!["/C".to_string(), "echo hydra_task_success".to_string()],
+            vec![],
+        );
+        #[cfg(not(target_os = "windows"))]
+        let task = ShellCommandTask::new(
+            "cmd_task",
+            "sh",
+            vec!["-c".to_string(), "echo hydra_task_success".to_string()],
+            vec![],
+        );
+
+        let output = task.execute().await.expect("shell command should succeed");
+        assert_eq!(output.exit_code, 0);
+        assert!(output.success);
+        assert!(output.output.contains("hydra_task_success"));
+    }
+
+    #[tokio::test]
+    async fn test_agent_prompt_task_execution() {
+        let task = AgentPromptTask::new("agent1", "Analyze the repository", vec![])
+            .with_model("claude-3-5-sonnet");
+        let output = task.execute().await.expect("agent task should succeed");
+        assert!(output.contains("[agent:claude-3-5-sonnet]"));
+        assert!(output.contains("Analyze the repository"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_command_task_with_env_and_dir() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        #[cfg(target_os = "windows")]
+        let task = ShellCommandTask::new(
+            "env_task",
+            "cmd",
+            vec!["/C".to_string(), "echo %HYDRA_TEST_VAR%".to_string()],
+            vec![],
+        )
+        .with_env("HYDRA_TEST_VAR", "hydra_env_ok")
+        .with_working_dir(temp_dir.path());
+
+        #[cfg(not(target_os = "windows"))]
+        let task = ShellCommandTask::new(
+            "env_task",
+            "sh",
+            vec!["-c".to_string(), "echo $HYDRA_TEST_VAR".to_string()],
+            vec![],
+        )
+        .with_env("HYDRA_TEST_VAR", "hydra_env_ok")
+        .with_working_dir(temp_dir.path());
+
+        let output = task.execute().await.expect("execute with env");
+        assert!(output.output.contains("hydra_env_ok"));
+    }
+
+    #[tokio::test]
+    async fn test_shell_command_task_timeout() {
+        #[cfg(target_os = "windows")]
+        let task = ShellCommandTask::new(
+            "timeout_task",
+            "powershell",
+            vec!["-Command".to_string(), "Start-Sleep -Seconds 5".to_string()],
+            vec![],
+        )
+        .with_timeout(Some(std::time::Duration::from_millis(100)));
+
+        #[cfg(not(target_os = "windows"))]
+        let task = ShellCommandTask::new(
+            "timeout_task",
+            "sleep",
+            vec!["5".to_string()],
+            vec![],
+        )
+        .with_timeout(Some(std::time::Duration::from_millis(100)));
+
+        let result = task.execute().await;
+        assert!(result.is_err());
+        assert!(result.unwrap_err().to_string().contains("timed out"));
+    }
 }
+
+

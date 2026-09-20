@@ -1,7 +1,4 @@
-//! Persistent retry state for provider candidates.
-//!
-//! This module provides atomic save/load of provider retry state across CLI
-//! sessions, including proper error handling and secret safety.
+// Atomic save/load of provider retry state across CLI sessions with secret safety
 
 use crate::retry_manager::ProviderState;
 use crate::routing::Candidate;
@@ -17,6 +14,12 @@ use tempfile::NamedTempFile;
 pub struct RetryState {
     pub provider_states: HashMap<String, ProviderState>,
     pub last_updated: SystemTime,
+}
+
+impl Default for RetryState {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl RetryState {
@@ -53,7 +56,7 @@ impl RetryState {
 pub struct RetryStateStore;
 
 impl RetryStateStore {
-    /// Load retry state from file, returning empty state if missing.
+    /// Load retry state from file, return empty if missing
     pub fn load(path: &Path) -> Result<RetryState> {
         if !path.exists() {
             return Ok(RetryState::new());
@@ -66,7 +69,7 @@ impl RetryStateStore {
         Ok(state)
     }
 
-    /// Save retry state atomically with a same-directory temporary file.
+    /// Save retry state atomically with temp file
     pub fn save(path: &Path, state: &RetryState) -> Result<()> {
         let serialized = serde_json::to_string_pretty(state)
             .map_err(|e| anyhow::anyhow!("failed to serialize retry state: {}", e))?;

@@ -9,7 +9,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.3.1"
+version = "0.3.2"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Akshay0831/hydra-cli"
@@ -18,10 +18,10 @@ authors = ["Hydra Contributors"]
 
 [workspace.dependencies]
 # Internal workspace crates with centralized versioning
-hydra-cli = { version = "0.3.1", path = "crates/hydra-cli" }
-hydra-matrix = { version = "0.3.1", path = "crates/hydra-matrix" }
-hydra-sandbox = { version = "0.3.1", path = "crates/hydra-sandbox" }
-hydra-dag = { version = "0.3.1", path = "crates/hydra-dag" }
+hydra-cli = { version = "0.3.2", path = "crates/hydra-cli" }
+hydra-matrix = { version = "0.3.2", path = "crates/hydra-matrix" }
+hydra-sandbox = { version = "0.3.2", path = "crates/hydra-sandbox" }
+hydra-dag = { version = "0.3.2", path = "crates/hydra-dag" }
 
 # Shared third-party dependencies
 tokio = { version = "1.38", features = ["full"] }
@@ -33,3 +33,4 @@ uuid = { version = "1.0", features = ["v4"] }
 async-trait = "0.1"
 tempfile = "3.27"
 tracing = "0.1"
+walkdir = "2"

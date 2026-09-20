@@ -1,7 +1,4 @@
-//! crates/hydra-cli/src/adapters/litellm.rs
-//!
-//! Process manager and lifecycle adapter for the local LiteLLM sidecar daemon.
-//! Ensures automatic spawning, health-checking, and graceful termination.
+// LiteLLM sidecar process manager with health-checking and graceful termination
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
@@ -29,14 +26,14 @@ impl Default for LiteLLMConfig {
     }
 }
 
-/// Single facade for managing the local LiteLLM sidecar daemon process.
+// LiteLLM sidecar daemon process manager
 pub struct LiteLLMManager {
     child: Option<Child>,
     config: LiteLLMConfig,
 }
 
 impl LiteLLMManager {
-    /// Launches the LiteLLM sidecar process if not already running on the configured port.
+    /// Launch LiteLLM sidecar if not running on configured port
     pub async fn spawn(config: LiteLLMConfig) -> Result<Self> {
         let mut manager = Self {
             child: None,

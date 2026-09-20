@@ -1,4 +1,4 @@
-//! Command handlers for Hydra CLI.
+// Hydra CLI command handlers
 
 use crate::agent_adapter::AgentAdapter;
 use crate::error::{ErrorContext, HydraCliError};
@@ -67,34 +67,34 @@ struct PromptOptions {
 #[derive(Subcommand, Debug)]
 #[command(author, version, about, long_about = None)]
 pub enum CommandHandler {
-    /// Create a starter Hydra routing configuration.
+        /// Create starter routing configuration
     Init {
         #[arg(long, default_value = "hydra.json")]
         config: std::path::PathBuf,
         #[arg(long)]
         force: bool,
     },
-    /// List configured profiles without printing credentials.
+        /// List profiles without credentials
     Profiles {
         #[arg(long, default_value = "hydra.json")]
         config: std::path::PathBuf,
     },
-    /// Validate configured credentials without printing secret values.
+        /// Validate credentials without secrets
     Credentials {
         #[arg(long, default_value = "hydra.json")]
         config: std::path::PathBuf,
     },
-    /// List registered upstream providers and their status.
+        /// List providers and status
     Providers {
         #[arg(long, default_value = "hydra.json")]
         config: std::path::PathBuf,
     },
-    /// Show retry and failover status for providers.
+        /// Show provider retry status
     RetryStatus {
         #[arg(long, default_value = "hydra.json")]
         config: std::path::PathBuf,
     },
-    /// Reset retry state for a provider.
+        /// Reset provider retry state
     ResetRetry {
         #[arg(long, default_value = "hydra.json")]
         config: std::path::PathBuf,
@@ -188,21 +188,48 @@ pub enum CommandHandler {
         coder_model: String,
         #[arg(long, default_value = "claude-3-5-sonnet")]
         reviewer_model: String,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        output: Option<std::path::PathBuf>,
     },
     /// Manages documentation tree, cross-links, and density profiles.
     Doc {
         #[command(subcommand)]
         action: DocAction,
     },
-    /// Launches high-speed headless IPC daemon.
+    /// Launches high-speed headless IPC daemon (TCP or stdio).
     Daemon {
         #[arg(long, default_value = "127.0.0.1:4545")]
         bind: String,
+        #[arg(long)]
+        stdio: bool,
     },
     /// Runs multi-toolchain gates and prints telemetry efficiency benchmark.
     Benchmark {
         #[arg(long, default_value = ".")]
         root: std::path::PathBuf,
+    },
+    /// Create a git-stash checkpoint of the current workspace state.
+    Checkpoint {
+        /// Workspace git repository root.
+        #[arg(long, default_value = ".")]
+        root: std::path::PathBuf,
+        /// Optional short label appended to the stash message.
+        #[arg(long)]
+        label: Option<String>,
+        /// List existing Hydra checkpoints instead of creating a new one.
+        #[arg(long)]
+        list: bool,
+    },
+    /// Revert the workspace to the most recent Hydra checkpoint (undo last patch).
+    Undo {
+        /// Workspace git repository root.
+        #[arg(long, default_value = ".")]
+        root: std::path::PathBuf,
+        /// List available checkpoints without restoring any.
+        #[arg(long)]
+        list: bool,
     },
 }
 
@@ -335,6 +362,8 @@ impl CommandHandler {
                 concurrency,
                 coder_model,
                 reviewer_model,
+                apply,
+                output,
             } => {
                 self.swarm(
                     intent,
@@ -342,13 +371,21 @@ impl CommandHandler {
                     *concurrency,
                     coder_model,
                     reviewer_model,
+                    *apply,
+                    output.clone(),
                     feedback,
                 )
                 .await
             }
             CommandHandler::Doc { action } => self.doc(action, feedback).await,
-            CommandHandler::Daemon { bind } => self.daemon(bind, feedback).await,
+            CommandHandler::Daemon { bind, stdio } => self.daemon(bind, *stdio, feedback).await,
             CommandHandler::Benchmark { root } => self.benchmark(root, feedback).await,
+            CommandHandler::Checkpoint { root, label, list } => {
+                self.checkpoint(root, label.as_deref(), *list, feedback).await
+            }
+            CommandHandler::Undo { root, list } => {
+                self.undo(root, *list, feedback).await
+            }
         }
     }
 
@@ -914,6 +951,7 @@ impl CommandHandler {
         Ok(())
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn swarm(
         &self,
         intent: &str,
@@ -921,30 +959,45 @@ impl CommandHandler {
         concurrency: usize,
         coder_model: &str,
         reviewer_model: &str,
+        apply: bool,
+        output: Option<PathBuf>,
         feedback: &mut CliFeedback,
     ) -> Result<(), HydraCliError> {
         feedback.info_message(format!("Initiating Hydra Swarm for intent: \"{intent}\""));
         feedback.start_spinner("Partitioning workspace AST dependencies...".to_string());
 
         let partitioner = crate::partitioner::AstSplitter::from_workspace(root)
+            .await
             .map_err(HydraCliError::TaskExecution)?;
 
-        // Find candidate project files to partition
-        let mut target_files = Vec::new();
-        let src_dir = root.join("src");
-        if src_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&src_dir) {
-                for entry in entries.flatten() {
-                    let p = entry.path();
-                    if p.extension()
-                        .map(|e| e == "rs" || e == "js" || e == "ts")
-                        .unwrap_or(false)
-                    {
-                        target_files.push(p);
-                    }
+        // Recursively collect all source files under the workspace root,
+        // skipping build artefacts and VCS directories.
+        let excluded_dirs: &[&str] = &["target", "node_modules", ".git", ".hydra"];
+        let target_extensions: &[&str] = &["rs", "js", "ts", "jsx", "tsx"];
+        let mut target_files: Vec<PathBuf> = walkdir::WalkDir::new(root)
+            .follow_links(false)
+            .into_iter()
+            .filter_entry(|entry| {
+                let name = entry.file_name().to_string_lossy();
+                if entry.file_type().is_dir() {
+                    return !excluded_dirs.iter().any(|exc| name == *exc);
                 }
-            }
-        }
+                true
+            })
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| {
+                if !entry.file_type().is_file() {
+                    return false;
+                }
+                let ext = entry
+                    .path()
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .unwrap_or("");
+                target_extensions.contains(&ext)
+            })
+            .map(|entry| entry.into_path())
+            .collect();
         if target_files.is_empty() {
             target_files.push(root.join("src/lib.rs"));
         }
@@ -1022,6 +1075,49 @@ impl CommandHandler {
                 "Swarm achieved consensus! Generated unified patch ({} lines)",
                 unified_patch.lines().count()
             ));
+
+            if let Err(inv_err) = crate::consolidator::Consolidator::validate_patch_invariants(&unified_patch) {
+                feedback.warning_message(format!("Patch invariant advisory: {inv_err}"));
+            }
+
+            if let Some(out_path) = output {
+                tokio::fs::write(&out_path, &unified_patch)
+                    .await
+                    .map_err(|e| HydraCliError::TaskExecution(e.into()))?;
+                feedback.success_message(format!("Saved unified patch to {}", out_path.display()));
+            }
+
+            if apply {
+                // M4: Snapshot the workspace before mutating it, enabling `hydra undo`.
+                feedback.start_spinner("Creating checkpoint before applying patch...".to_string());
+                match crate::checkpoints::checkpoint_before_patch(root, Some("pre-swarm")).await {
+                    Ok(Some(label)) => feedback.info_message(format!("Checkpoint created: {label}")),
+                    Ok(None) => feedback.info_message("Working tree clean, no checkpoint needed.".to_string()),
+                    Err(e) => feedback.warning_message(format!("Could not create checkpoint: {e}")),
+                }
+                feedback.stop_spinner();
+
+                feedback.start_spinner("Applying patch to workspace...".to_string());
+                let mut cmd = tokio::process::Command::new("git");
+                cmd.args(["apply", "--whitespace=nowarn", "-"])
+                    .current_dir(root)
+                    .stdin(std::process::Stdio::piped())
+                    .stdout(std::process::Stdio::piped())
+                    .stderr(std::process::Stdio::piped());
+                let mut child = cmd.spawn().map_err(|e| HydraCliError::TaskExecution(e.into()))?;
+                if let Some(mut stdin) = child.stdin.take() {
+                    use tokio::io::AsyncWriteExt;
+                    let _ = stdin.write_all(unified_patch.as_bytes()).await;
+                }
+                let output = child.wait_with_output().await.map_err(|e| HydraCliError::TaskExecution(e.into()))?;
+                feedback.stop_spinner();
+                if output.status.success() {
+                    feedback.success_message("Successfully applied unified patch to workspace.\n  Run `hydra undo` to revert.".to_string());
+                } else {
+                    let err_msg = String::from_utf8_lossy(&output.stderr);
+                    feedback.error_message(format!("Failed to apply patch: {}", err_msg.trim()));
+                }
+            }
         }
 
         Ok(())
@@ -1087,8 +1183,8 @@ cache_strategy = "memory-hash-diff"
                 let mut broken_links = 0usize;
 
                 for line in content.lines() {
-                    if let Some(start) = line.find("](") {
-                        if let Some(end) = line[start + 2..].find(')') {
+                    if let Some(start) = line.find("](")
+                        && let Some(end) = line[start + 2..].find(')') {
                             let target = &line[start + 2..start + 2 + end];
                             if !target.starts_with("http") && !target.starts_with('#') {
                                 checked_links += 1;
@@ -1101,7 +1197,6 @@ cache_strategy = "memory-hash-diff"
                                 }
                             }
                         }
-                    }
                 }
 
                 if broken_links > 0 {
@@ -1263,21 +1358,120 @@ cache_strategy = "memory-hash-diff"
         Ok(())
     }
 
-    /// Binds TCP server for JSON-RPC 2.0 streaming interface.
+    /// Launches headless IPC daemon over TCP or stdio.
     async fn daemon(
         &self,
         bind_addr: &str,
+        stdio: bool,
         feedback: &mut CliFeedback,
     ) -> Result<(), HydraCliError> {
-        feedback.success_message(format!(
-            "Hydra Headless Engine Daemon listening on {bind_addr}"
-        ));
-        feedback
-            .info_message("Ready for GUI/frontend JSON-RPC IPC streaming connections.".to_string());
+        if stdio {
+            crate::daemon::run_daemon_stdio()
+                .await
+                .map_err(HydraCliError::TaskExecution)?;
+        } else {
+            feedback.success_message(format!(
+                "Hydra Headless Engine Daemon listening on {bind_addr}"
+            ));
+            feedback
+                .info_message("Ready for GUI/frontend JSON-RPC IPC streaming connections.".to_string());
 
-        crate::daemon::run_daemon_server(bind_addr)
-            .await
-            .map_err(HydraCliError::TaskExecution)?;
+            crate::daemon::run_daemon_server(bind_addr)
+                .await
+                .map_err(HydraCliError::TaskExecution)?;
+        }
+
+        Ok(())
+    }
+
+    /// Create or list git-stash-based Hydra checkpoints.
+    async fn checkpoint(
+        &self,
+        root: &Path,
+        label: Option<&str>,
+        list: bool,
+        feedback: &mut CliFeedback,
+    ) -> Result<(), HydraCliError> {
+        let mgr = crate::checkpoints::CheckpointManager::new(root);
+
+        if list {
+            let checkpoints = mgr
+                .list()
+                .await
+                .map_err(HydraCliError::TaskExecution)?;
+
+            if checkpoints.is_empty() {
+                feedback.info_message("No Hydra checkpoints found.".to_string());
+            } else {
+                feedback.info_message(format!("Found {} Hydra checkpoint(s):", checkpoints.len()));
+                for cp in &checkpoints {
+                    let ts_secs = cp.created_at_ms / 1000;
+                    println!("  {} — {} (t={})", cp.stash_ref, cp.label, ts_secs);
+                }
+            }
+            return Ok(());
+        }
+
+        feedback.start_spinner("Creating workspace checkpoint...".to_string());
+        match mgr.create(label).await {
+            Ok(label) => {
+                feedback.stop_spinner();
+                feedback.success_message(format!("Checkpoint created: {label}"));
+                feedback.info_message("Run `hydra undo` to restore this state.".to_string());
+            }
+            Err(e) => {
+                feedback.stop_spinner();
+                let msg = e.to_string();
+                if msg.contains("No local changes") || msg.contains("nothing to stash") {
+                    feedback.info_message("Working tree is clean — no checkpoint needed.".to_string());
+                } else {
+                    return Err(HydraCliError::TaskExecution(e));
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Revert the workspace to the most recent Hydra checkpoint (undo).
+    async fn undo(
+        &self,
+        root: &Path,
+        list: bool,
+        feedback: &mut CliFeedback,
+    ) -> Result<(), HydraCliError> {
+        let mgr = crate::checkpoints::CheckpointManager::new(root);
+
+        if list {
+            let checkpoints = mgr
+                .list()
+                .await
+                .map_err(HydraCliError::TaskExecution)?;
+
+            if checkpoints.is_empty() {
+                feedback.info_message("No Hydra checkpoints available to undo.".to_string());
+            } else {
+                feedback.info_message(format!("Available Hydra checkpoints ({}):", checkpoints.len()));
+                for cp in &checkpoints {
+                    let ts_secs = cp.created_at_ms / 1000;
+                    println!("  {} — {} (t={})", cp.stash_ref, cp.label, ts_secs);
+                }
+                feedback.info_message("Run `hydra undo` (without --list) to restore the latest.".to_string());
+            }
+            return Ok(());
+        }
+
+        feedback.start_spinner("Reverting to last Hydra checkpoint...".to_string());
+        match mgr.pop_latest().await {
+            Ok(label) => {
+                feedback.stop_spinner();
+                feedback.success_message(format!("Restored checkpoint: {label}"));
+            }
+            Err(e) => {
+                feedback.stop_spinner();
+                return Err(HydraCliError::TaskExecution(e));
+            }
+        }
 
         Ok(())
     }

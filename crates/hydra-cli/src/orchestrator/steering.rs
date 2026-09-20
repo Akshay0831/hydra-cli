@@ -1,9 +1,9 @@
-//! Strategic decision steering with goal tracking and human intervention seams.
+// Strategic decision steering with goal tracking and human intervention seams
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 
-/// Represents a viable architectural path in a decision seam (Phase 4.2).
+/// Architectural path in decision seam (Phase 4.2)
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DecisionOption {
     pub id: String,
@@ -14,7 +14,7 @@ pub struct DecisionOption {
     pub blast_radius_files: Vec<String>,
 }
 
-/// Concise architectural brief presented to human or IPC client (Phase 4.2).
+/// Architectural brief for human/IPC client (Phase 4.2)
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DecisionBrief {
     pub decision_id: String,
@@ -24,7 +24,7 @@ pub struct DecisionBrief {
 }
 
 impl DecisionBrief {
-    /// Format brief into machine-dense Markdown summary.
+    /// Format brief into machine-dense Markdown
     pub fn format_brief(&self) -> String {
         let mut out = Vec::new();
         out.push(format!("### STRATEGIC DECISION REQUIRED: {}", self.title));
@@ -45,11 +45,11 @@ impl DecisionBrief {
     }
 }
 
-/// Strategic Human Decision Seam (Phase 4.2).
+/// Strategic human decision seam (Phase 4.2)
 pub struct DecisionSeam;
 
 impl DecisionSeam {
-    /// Evaluates and selects an architectural path from a decision brief.
+    /// Resolve architectural path from decision brief
     pub fn resolve(brief: &DecisionBrief, selected_option_id: &str) -> Result<DecisionOption> {
         for opt in &brief.options {
             if opt.id == selected_option_id {
@@ -64,18 +64,15 @@ impl DecisionSeam {
     }
 }
 
-/// Model capability tiers for cognitive steering (Phase 4.3).
+/// Model capability tiers for cognitive steering (Phase 4.3)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CapabilityTier {
-    /// Extended thinking / deep reasoning models (Claude 3.5 Sonnet, GPT-4o, O1, Gemini 2.5 Pro).
-    DeepReasoning,
-    /// High-throughput fast models (GLM-4.5 Flash, Gemini Flash, Claude Haiku, Llama 3.3).
-    FastThroughput,
-    /// Budget fallbacks or small local weights.
-    Fallback,
+    DeepReasoning,  // Extended thinking models
+    FastThroughput, // High-throughput fast models
+    Fallback,       // Budget fallbacks
 }
 
-/// Cognitive Steering prompt generator (Phase 4.3).
+/// Cognitive steering prompt generator (Phase 4.3)
 pub struct CognitiveSteering;
 
 impl CognitiveSteering {
@@ -180,31 +177,29 @@ pub struct PlanExecuteVerifyWorkflow {
 impl PlanExecuteVerifyWorkflow {
     /// Decomposes a macro task intent into structured milestones.
     pub fn decompose(intent: &str, target_files: &[String]) -> Self {
-        let mut milestones = Vec::new();
-
-        // 1. AST & Invariant Inspection milestone
-        milestones.push(PlanMilestone {
-            step: 1,
-            title: "Inspect target AST signatures and verify scope constraints".to_string(),
-            target_scope: target_files.to_vec(),
-            completed: false,
-        });
-
-        // 2. Focused Partition Code Generation milestone
-        milestones.push(PlanMilestone {
-            step: 2,
-            title: "Execute targeted code edit without introducing wrappers".to_string(),
-            target_scope: target_files.to_vec(),
-            completed: false,
-        });
-
-        // 3. Verification & Invariant Audit milestone
-        milestones.push(PlanMilestone {
-            step: 3,
-            title: "Run compiler checks, linter invariant gates, and test suites".to_string(),
-            target_scope: target_files.to_vec(),
-            completed: false,
-        });
+        let milestones = vec![
+            // 1. AST & Invariant Inspection milestone
+            PlanMilestone {
+                step: 1,
+                title: "Inspect target AST signatures and verify scope constraints".to_string(),
+                target_scope: target_files.to_vec(),
+                completed: false,
+            },
+            // 2. Focused Partition Code Generation milestone
+            PlanMilestone {
+                step: 2,
+                title: "Execute targeted code edit without introducing wrappers".to_string(),
+                target_scope: target_files.to_vec(),
+                completed: false,
+            },
+            // 3. Verification & Invariant Audit milestone
+            PlanMilestone {
+                step: 3,
+                title: "Run compiler checks, linter invariant gates, and test suites".to_string(),
+                target_scope: target_files.to_vec(),
+                completed: false,
+            },
+        ];
 
         Self {
             intent: intent.to_string(),

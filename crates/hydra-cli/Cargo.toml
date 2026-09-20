@@ -4,8 +4,15 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
-readme = "../../README.md"
 description = "Hydra CLI for agent workflows, routing, indexing, sandboxing, and task execution"
+
+[lib]
+name = "hydra_cli"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hydra-cli"
+path = "src/main.rs"
 
 [dependencies]
 pi = { package = "pi_agent_rust", version = "0.2.0", path = "../../submodules/pi_agent_rust" }
@@ -22,6 +29,7 @@ rand = "0.8"
 thiserror = "1.0"
 tempfile = { workspace = true }
 tracing = { workspace = true }
+walkdir = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -1,4 +1,4 @@
-//! Multi-worker swarm orchestration across isolated worktrees.
+// Multi-worker swarm orchestration across isolated worktrees
 
 pub mod steering;
 pub mod swarm;

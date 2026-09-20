@@ -1,7 +1,4 @@
-//! crates/hydra-cli/src/adapters/pi_agent.rs
-//!
-//! Hydra-owned facade adapter around the upstream Pi embedding API.
-//! Single execution gateway for Coder, Tester, and Reviewer agent turns.
+// Hydra facade adapter for Pi API execution gateway for Coder/Tester/Reviewer turns
 
 use anyhow::Result;
 use pi::model::AssistantMessageEvent;
@@ -9,15 +6,12 @@ use pi::sdk::{AgentEvent, SessionOptions};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
-/// Specialized role for an agent worker in the swarm.
+/// Agent worker role in swarm
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AgentRole {
-    /// Implements code modifications and fixes.
-    Coder,
-    /// Executes unit tests and test suites; inspects compiler and runtime errors.
-    Tester,
-    /// Audits code diffs for security, logic flaws, and architectural integrity.
-    Reviewer,
+    Coder,        // Code modifications and fixes
+    Tester,       // Unit testing and error inspection
+    Reviewer,      // Code audit for security/architecture
 }
 
 impl std::fmt::Display for AgentRole {

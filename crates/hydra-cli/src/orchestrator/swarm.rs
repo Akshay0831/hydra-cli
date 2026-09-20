@@ -1,7 +1,4 @@
-//! crates/hydra-cli/src/orchestrator/swarm.rs
-//!
-//! Tokio-based multi-threaded parallel swarm orchestrator.
-//! Manages Coder, Tester, and Reviewer worker loops across isolated Git worktrees.
+// Tokio-based multi-threaded swarm orchestrator managing Coder/Tester/Reviewer across worktrees
 
 use anyhow::Result;
 use std::collections::HashMap;
@@ -13,8 +10,10 @@ use crate::adapters::litellm::LiteLLMManager;
 use crate::adapters::mcp::McpAdapter;
 use crate::adapters::pi_agent::{AgentAdapter, AgentRole, PromptRequest, ScopeConstraint};
 use crate::partitioner::ast_splitter::FilePartition;
+use crate::prompt_router::{PromptPrefixAligner, ProjectGoalRegistry};
+use hydra_matrix::{ContextLoader, ContextStrategyKind};
 
-/// Ephemeral Git Worktree isolation guard (Pattern C).
+/// Git worktree isolation guard (Pattern C)
 #[derive(Debug)]
 pub struct GitWorktreeGuard {
     pub worktree_id: String,
@@ -22,7 +21,7 @@ pub struct GitWorktreeGuard {
 }
 
 impl GitWorktreeGuard {
-    /// Creates an isolated git worktree under `.hydra/worktrees/<id>`.
+    /// Creates isolated git worktree under `.hydra/worktrees/<id>`
     pub async fn create(base_repo: &Path, worktree_id: &str) -> Result<Self> {
         if worktree_id.is_empty()
             || !worktree_id
@@ -230,92 +229,153 @@ impl SwarmOrchestrator {
                     }
                 };
 
-                // 2. Coder Worker Turn
-                let _ = tx
-                    .send(SwarmEvent::WorkerTurnStarted {
-                        partition_id: part_id.clone(),
-                        role: AgentRole::Coder,
+                // 2. Multi-turn Self-Healing Coder & Tester Loop
+                let max_repair_turns = 2usize;
+                let mut current_turn = 0usize;
+                let mut test_passed = false;
+                let mut last_test_output = String::new();
+                let mut diff = String::new();
+
+                while current_turn <= max_repair_turns {
+                    let _ = tx
+                        .send(SwarmEvent::WorkerTurnStarted {
+                            partition_id: part_id.clone(),
+                            role: AgentRole::Coder,
+                        })
+                        .await;
+
+                    let coder_prompt = if current_turn == 0 {
+                        // Build a compact, cache-aligned prompt with:
+                        //   1. Architectural invariants from ProjectGoalRegistry
+                        //   2. AST skeletons for each file in the assigned scope
+                        //   3. User intent at tail (dynamic payload)
+                        let goals = ProjectGoalRegistry::load_or_default(&base_path).await;
+                        let invariants = goals.format_invariant_header();
+
+                        let loader = ContextLoader::new();
+                        let mut skeleton_parts = Vec::new();
+                        for file_path in partition.all_files.iter().take(8) {
+                            if let Ok(ctx) = loader
+                                .load_context(file_path, &base_path, ContextStrategyKind::ASTSkeleton)
+                                .await
+                                && !ctx.code_skeleton.is_empty() {
+                                    skeleton_parts.push(format!(
+                                        "// {}\n{}",
+                                        file_path.display(),
+                                        ctx.code_skeleton
+                                    ));
+                                }
+                        }
+                        let ast_skeleton = skeleton_parts.join("\n\n");
+
+                        PromptPrefixAligner::build_cache_aligned_prompt(
+                            "You are an expert autonomous coding agent. Implement the requested changes precisely within the assigned file scope.",
+                            &invariants,
+                            &[],
+                            &ast_skeleton,
+                            &format!("Task: {}\nAssigned scope files: {:?}", prompt, partition.all_files),
+                        )
+                    } else {
+                        let findings = crate::consolidator::Consolidator::deduplicate_logs(&last_test_output, "");
+                        let error_summary = findings
+                            .iter()
+                            .take(5)
+                            .map(|f| format!("- [{}] {}", f.priority, f.message))
+                            .collect::<Vec<_>>()
+                            .join("\n");
+                        format!(
+                            "Task: {}\nAssigned scope files: {:?}\n\nPREVIOUS VERIFICATION FAILED (Turn {}/{}). Fix these compiler/test diagnostics:\n{}\n\nFull output:\n{}",
+                            prompt, partition.all_files, current_turn, max_repair_turns, error_summary, last_test_output
+                        )
+                    };
+
+                    let tx_delta = tx.clone();
+                    let pid_clone = part_id.clone();
+                    let coder_request = PromptRequest {
+                        message: coder_prompt,
+                        tools: vec!["edit_file".to_string(), "read_file".to_string()],
+                        role: Some(AgentRole::Coder),
+                        scope: Some(ScopeConstraint::new(partition.all_files.clone())),
+                        provider: None,
+                        model: Some(coder_model.clone()),
+                        model_alias: None,
+                        api_key: None,
+                        working_directory: worktree.path.clone(),
+                    };
+
+                    AgentAdapter::prompt(coder_request, move |chunk| {
+                        let _ = tx_delta.try_send(SwarmEvent::DeltaReceived {
+                            partition_id: pid_clone.clone(),
+                            role: AgentRole::Coder,
+                            text: chunk.to_string(),
+                        });
                     })
-                    .await;
+                    .await?;
 
-                let tx_delta = tx.clone();
-                let pid_clone = part_id.clone();
-                let coder_request = PromptRequest {
-                    message: format!(
-                        "Task: {}\nAssigned scope files: {:?}",
-                        prompt, partition.all_files
-                    ),
-                    tools: vec!["edit_file".to_string(), "read_file".to_string()],
-                    role: Some(AgentRole::Coder),
-                    scope: Some(ScopeConstraint::new(partition.all_files.clone())),
-                    provider: None,
-                    model: Some(coder_model),
-                    model_alias: None,
-                    api_key: None,
-                    working_directory: worktree.path.clone(),
-                };
-
-                let _coder_res = AgentAdapter::prompt(coder_request, move |chunk| {
-                    let _ = tx_delta.try_send(SwarmEvent::DeltaReceived {
-                        partition_id: pid_clone.clone(),
-                        role: AgentRole::Coder,
-                        text: chunk.to_string(),
-                    });
-                })
-                .await?;
-
-                let allowed_paths = partition
-                    .all_files
-                    .iter()
-                    .map(|path| path.strip_prefix(&base_path).unwrap_or(path).to_path_buf())
-                    .collect::<Vec<_>>();
-                for changed_path in worktree.changed_paths().await? {
-                    if !allowed_paths.iter().any(|allowed| {
-                        changed_path == *allowed || changed_path.starts_with(allowed)
-                    }) {
-                        let _ = worktree.teardown().await;
-                        anyhow::bail!(
-                            "coder modified file outside assigned scope: {}",
-                            changed_path.display()
-                        );
+                    let allowed_paths = partition
+                        .all_files
+                        .iter()
+                        .map(|path| path.strip_prefix(&base_path).unwrap_or(path).to_path_buf())
+                        .collect::<Vec<_>>();
+                    for changed_path in worktree.changed_paths().await? {
+                        if !allowed_paths.iter().any(|allowed| {
+                            changed_path == *allowed || changed_path.starts_with(allowed)
+                        }) {
+                            let _ = worktree.teardown().await;
+                            anyhow::bail!(
+                                "coder modified file outside assigned scope: {}",
+                                changed_path.display()
+                            );
+                        }
                     }
+
+                    diff = worktree.get_diff().await.unwrap_or_default();
+                    let _ = tx
+                        .send(SwarmEvent::DiffReady {
+                            partition_id: part_id.clone(),
+                            diff: diff.clone(),
+                        })
+                        .await;
+
+                    // 3. Tester Worker Turn (MCP tools executed inside the isolated worktree directory)
+                    let _ = tx
+                        .send(SwarmEvent::WorkerTurnStarted {
+                            partition_id: part_id.clone(),
+                            role: AgentRole::Tester,
+                        })
+                        .await;
+
+                    let mcp = McpAdapter::new("cargo".to_string(), vec![]);
+                    let test_res = mcp
+                        .call_tool_in_dir("cargo_check", serde_json::json!({}), &worktree.path)
+                        .await
+                        .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
+
+                    test_passed = test_res
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .map(|s| s == "success")
+                        .unwrap_or(false);
+
+                    last_test_output = format!(
+                        "{}\n{}",
+                        test_res.get("stderr").and_then(|s| s.as_str()).unwrap_or_default(),
+                        test_res.get("stdout").and_then(|s| s.as_str()).unwrap_or_default()
+                    );
+
+                    let _ = tx
+                        .send(SwarmEvent::TestCompleted {
+                            partition_id: part_id.clone(),
+                            passed: test_passed,
+                            output: test_res.to_string(),
+                        })
+                        .await;
+
+                    if test_passed {
+                        break;
+                    }
+                    current_turn += 1;
                 }
-
-                let diff = worktree.get_diff().await.unwrap_or_default();
-                let _ = tx
-                    .send(SwarmEvent::DiffReady {
-                        partition_id: part_id.clone(),
-                        diff: diff.clone(),
-                    })
-                    .await;
-
-                // 3. Tester Worker Turn (MCP tools)
-                let _ = tx
-                    .send(SwarmEvent::WorkerTurnStarted {
-                        partition_id: part_id.clone(),
-                        role: AgentRole::Tester,
-                    })
-                    .await;
-
-                let mcp = McpAdapter::new("cargo".to_string(), vec![]);
-                let test_res = mcp
-                    .call_tool("cargo_check", serde_json::json!({}))
-                    .await
-                    .unwrap_or_else(|e| serde_json::json!({ "error": e.to_string() }));
-
-                let passed = test_res
-                    .get("status")
-                    .and_then(|s| s.as_str())
-                    .map(|s| s == "success")
-                    .unwrap_or(false);
-
-                let _ = tx
-                    .send(SwarmEvent::TestCompleted {
-                        partition_id: part_id.clone(),
-                        passed,
-                        output: test_res.to_string(),
-                    })
-                    .await;
 
                 // 4. Reviewer Worker Turn
                 let _ = tx
@@ -329,7 +389,7 @@ impl SwarmOrchestrator {
                 let pid_rev = part_id.clone();
                 let reviewer_request = PromptRequest {
                     message: format!(
-                        "Audit this proposed patch for security and regressions:\n```diff\n{}\n```",
+                        "Audit this proposed patch for security and regressions. If approved, indicate 'APPROVED: true'. If rejected, indicate 'APPROVED: false' and explain why:\n```diff\n{}\n```",
                         diff
                     ),
                     tools: vec![],
@@ -342,7 +402,12 @@ impl SwarmOrchestrator {
                     working_directory: worktree.path.clone(),
                 };
 
+                let review_text = Arc::new(tokio::sync::Mutex::new(String::new()));
+                let review_text_clone = review_text.clone();
+
                 let _ = AgentAdapter::prompt(reviewer_request, move |chunk| {
+                    let mut lock = review_text_clone.blocking_lock();
+                    lock.push_str(chunk);
                     let _ = tx_rev.try_send(SwarmEvent::DeltaReceived {
                         partition_id: pid_rev.clone(),
                         role: AgentRole::Reviewer,
@@ -351,19 +416,30 @@ impl SwarmOrchestrator {
                 })
                 .await;
 
+                let review_output = review_text.lock().await.clone();
+                let is_rejected = review_output.to_lowercase().contains("approved: false")
+                    || review_output.to_lowercase().contains("rejected:");
+                let approved = test_passed && !is_rejected;
+
                 let _ = tx
                     .send(SwarmEvent::ReviewCompleted {
                         partition_id: part_id.clone(),
-                        approved: true,
-                        comments: "Review approved".to_string(),
+                        approved,
+                        comments: if review_output.trim().is_empty() {
+                            "Review completed".to_string()
+                        } else {
+                            review_output
+                        },
                     })
                     .await;
 
-                let _ = tx
-                    .send(SwarmEvent::ConsensusReached {
-                        partition_id: part_id.clone(),
-                    })
-                    .await;
+                if approved {
+                    let _ = tx
+                        .send(SwarmEvent::ConsensusReached {
+                            partition_id: part_id.clone(),
+                        })
+                        .await;
+                }
 
                 // 5. Cleanup Worktree
                 worktree.teardown().await?;
@@ -452,4 +528,14 @@ mod tests {
         };
         assert!(guard.teardown().await.is_ok());
     }
+
+    #[tokio::test]
+    async fn test_git_worktree_guard_rejects_malicious_id() {
+        let bad_ids = ["../escaped", "id;rm -rf", "has space", "", "id&calc", "id|calc"];
+        for bad in bad_ids {
+            let res = GitWorktreeGuard::create(Path::new("."), bad).await;
+            assert!(res.is_err(), "Expected error for invalid id '{bad}'");
+        }
+    }
 }
+

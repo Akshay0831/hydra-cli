@@ -1,4 +1,4 @@
-//! Progress indicators and user feedback for CLI operations.
+// CLI progress indicators and user feedback
 
 use crate::spinner::EnhancedSpinner;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -8,14 +8,43 @@ use std::time::{Duration, Instant};
 #[derive(Clone)]
 pub struct CliFeedback {
     spinner: Option<EnhancedSpinner>,
+    /// Emit NDJSON instead of human-readable text (hydra --json)
+    pub json_mode: bool,
 }
 
 impl CliFeedback {
     pub fn new() -> Self {
-        Self { spinner: None }
+        Self {
+            spinner: None,
+            json_mode: false,
+        }
+    }
+
+    /// Construct with JSON output mode
+    pub fn new_with_json(json_mode: bool) -> Self {
+        Self {
+            spinner: None,
+            json_mode,
+        }
+    }
+
+    /// Emit NDJSON event: {"type":"<kind>","message":"<msg>","ts":<unix_ms>}
+    /// Use for structured output when --json is active
+    pub fn json_event(&self, kind: &str, message: &str) {
+        let ts = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        // Escape message for inline JSON (newlines → \n, quotes → \")
+        let escaped = message.replace('\\', "\\\\").replace('"', "\\\"").replace('\n', "\\n");
+        println!(r#"{{"type":"{kind}","message":"{escaped}","ts":{ts}}}"#);
     }
 
     pub fn start_spinner(&mut self, message: String) {
+        if self.json_mode {
+            self.json_event("spinner_start", &message);
+            return;
+        }
         let mut spinner = EnhancedSpinner::new(message);
         spinner.add_status_message("working".to_string());
         spinner.start();
@@ -23,6 +52,10 @@ impl CliFeedback {
     }
 
     pub fn stop_spinner(&mut self) {
+        if self.json_mode {
+            self.json_event("spinner_stop", "");
+            return;
+        }
         if let Some(spinner) = self.spinner.take() {
             spinner.stop();
         }
@@ -35,21 +68,45 @@ impl CliFeedback {
     }
 
     pub fn update_spinner(&mut self, message: String) {
+        if self.json_mode {
+            self.json_event("spinner_update", &message);
+            return;
+        }
         if let Some(spinner) = &mut self.spinner {
             spinner.update_message(message);
         }
     }
 
     pub fn success_message(&self, message: String) {
-        println!("✅ {message}");
+        if self.json_mode {
+            self.json_event("success", &message);
+        } else {
+            println!("✅ {message}");
+        }
     }
 
     pub fn info_message(&self, message: String) {
-        println!("ℹ️  {message}");
+        if self.json_mode {
+            self.json_event("info", &message);
+        } else {
+            println!("ℹ️  {message}");
+        }
     }
 
     pub fn warning_message(&self, message: String) {
-        eprintln!("⚠️  {message}");
+        if self.json_mode {
+            self.json_event("warning", &message);
+        } else {
+            eprintln!("⚠️  {message}");
+        }
+    }
+
+    pub fn error_message(&self, message: String) {
+        if self.json_mode {
+            self.json_event("error", &message);
+        } else {
+            eprintln!("❌ {message}");
+        }
     }
 }
 
@@ -383,4 +440,36 @@ mod tests {
         assert_eq!(stats[0].total, 2);
         assert_eq!(stats[0].failed, 1);
     }
+
+    #[test]
+    fn test_cli_feedback_constructors_and_json_mode() {
+        let default_fb = CliFeedback::new();
+        assert!(!default_fb.json_mode);
+
+        let json_fb = CliFeedback::new_with_json(true);
+        assert!(json_fb.json_mode);
+    }
+
+    #[tokio::test]
+    async fn test_cli_feedback_messages_in_both_modes() {
+        let mut human_fb = CliFeedback::new();
+        human_fb.info_message("human info".to_string());
+        human_fb.success_message("human success".to_string());
+        human_fb.warning_message("human warning".to_string());
+        human_fb.error_message("human error".to_string());
+        human_fb.start_spinner("human spin".to_string());
+        human_fb.update_spinner("human spin update".to_string());
+        human_fb.stop_spinner();
+
+        let mut json_fb = CliFeedback::new_with_json(true);
+        json_fb.info_message("json info".to_string());
+        json_fb.success_message("json success".to_string());
+        json_fb.warning_message("json warning".to_string());
+        json_fb.error_message("json error".to_string());
+        json_fb.start_spinner("json spin".to_string());
+        json_fb.update_spinner("json spin update".to_string());
+        json_fb.stop_spinner();
+        json_fb.json_event("custom", "test message with \"quotes\" and \n newline");
+    }
 }
+

@@ -1,7 +1,4 @@
-//! Retry/failover state management for provider adapters.
-//!
-//! This module implements bounded retry logic with exponential backoff for
-//! transient failures, maintaining failover state between provider calls.
+// Provider adapter retry logic with exponential backoff for transient failures
 
 use crate::retry_state_store::{RetryState, RetryStateStore};
 use crate::routing::{Candidate, RoutingConfig, RoutingRequest};
@@ -10,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Serializable timestamp for persistence.
+/// Serializable timestamp for persistence
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct InstantWrapper {
     pub timestamp_secs: u64,
@@ -27,19 +24,14 @@ impl From<SystemTime> for InstantWrapper {
     }
 }
 
-/// Retry configuration for provider calls.
+/// Provider call retry configuration
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RetryConfig {
-    /// Maximum number of retry attempts.
-    pub max_attempts: u32,
-    /// Initial backoff duration.
-    pub initial_backoff: Duration,
-    /// Maximum backoff duration.
-    pub max_backoff: Duration,
-    /// Backoff multiplier for exponential growth.
-    pub backoff_multiplier: f64,
-    /// Whether to enable jitter for backoff.
-    pub enable_jitter: bool,
+    pub max_attempts: u32,      // Maximum retry attempts
+    pub initial_backoff: Duration, // Initial backoff duration
+    pub max_backoff: Duration,  // Maximum backoff duration
+    pub backoff_multiplier: f64, // Exponential backoff multiplier
+    pub enable_jitter: bool,    // Enable jitter for backoff
 }
 
 impl Default for RetryConfig {
@@ -54,23 +46,16 @@ impl Default for RetryConfig {
     }
 }
 
-/// State for a specific provider candidate.
+/// State for specific provider candidate
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ProviderState {
-    /// Name of the provider.
-    pub provider: String,
-    /// Model being used.
-    pub model: String,
-    /// Profile being used.
-    pub profile: String,
-    /// Number of consecutive failures.
-    pub consecutive_failures: u32,
-    /// Last failure timestamp.
-    pub last_failure: Option<InstantWrapper>,
-    /// Total number of successful calls.
-    pub successful_calls: u64,
-    /// Total number of failed calls.
-    pub failed_calls: u64,
+    pub provider: String,       // Provider name
+    pub model: String,          // Model being used
+    pub profile: String,        // Profile being used
+    pub consecutive_failures: u32, // Consecutive failures count
+    pub last_failure: Option<InstantWrapper>, // Last failure timestamp
+    pub successful_calls: u64,   // Successful calls count
+    pub failed_calls: u64,      // Failed calls count
     /// Last error (if any).
     pub last_error: Option<String>,
 }
@@ -195,15 +180,13 @@ impl RetryManager {
 
         if !self.provider_states.contains_key(&key) {
             // Check if we have persistent state
-            if let Some(ref path) = self.state_store_path {
-                if let Ok(state) = RetryStateStore::load(path) {
-                    if let Some(persistent_state) = state.provider_states.get(&key) {
+            if let Some(ref path) = self.state_store_path
+                && let Ok(state) = RetryStateStore::load(path)
+                    && let Some(persistent_state) = state.provider_states.get(&key) {
                         self.provider_states
                             .insert(key.clone(), persistent_state.clone());
                         return key;
                     }
-                }
-            }
 
             // Create new state
             self.provider_states.insert(

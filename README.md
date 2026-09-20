@@ -47,12 +47,49 @@ cargo build --workspace --release
 ### Autonomous Parallel Swarm
 Partition AST dependencies and execute parallel worker trios in ephemeral Git worktrees:
 ```bash
+# Execute swarm and review proposed patch
 hydra-cli swarm "Refactor database pool and update tests" --concurrency 4
+
+# Execute swarm, review, and automatically apply patch with pre-patch safety checkpoint
+hydra-cli swarm "Fix race condition in session picker" --apply --output patch.diff
 ```
 * `--root <DIR>`: Repository root (default: `.`)
 * `--concurrency <N>`: Worker trio concurrency limit (default: `4`)
 * `--coder-model <MODEL>`: Implementation model (default: `gemini-2.5-pro`)
 * `--reviewer-model <MODEL>`: Audit/review model (default: `claude-3-5-sonnet`)
+* `--apply`: Creates a pre-patch checkpoint and applies the unified diff to the workspace
+* `--output <FILE>`: Save the unified patch to disk
+
+### Git Checkpoints & Rollback
+Safety mechanisms for instant workspace reversion:
+```bash
+hydra-cli checkpoint --label "before-big-refactor"   # Create labelled snapshot
+hydra-cli checkpoint --list                          # View all Hydra checkpoints
+hydra-cli undo                                       # Revert to the latest snapshot
+hydra-cli undo --list                                # Preview available rollback points
+```
+
+### Headless JSON-RPC 2.0 Daemon
+Connect external frontends, VS Code extensions, JetBrains plugins, and web dashboards:
+```bash
+# Stdio transport (LSP-style for IDE extensions):
+hydra-cli daemon --stdio
+
+# TCP transport (for local web apps and dashboards):
+hydra-cli daemon --bind 127.0.0.1:4545
+```
+
+### Programmatic Rust Library Usage (`hydra-core`)
+Rust web apps (Axum, Leptos, Tauri) can import `hydra-cli` directly as a library:
+```rust
+use hydra_cli::{SwarmOrchestrator, SwarmConfig, DaemonState};
+
+let orchestrator = SwarmOrchestrator::new(SwarmConfig::default(), None);
+let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(128);
+let handle = tokio::spawn(async move {
+    orchestrator.run_swarm(repo_path, intent, partitions, event_tx).await
+});
+```
 
 ### Prompt & Routing
 ```bash
@@ -68,8 +105,12 @@ hydra-cli retry-status --config hydra.json
 hydra-cli reset-retry --config hydra.json --provider openai --model coding --profile primary
 ```
 
-### Offline & Local Tools (No API Key Required)
+### Machine-Readable Streaming & Local Tools
 ```bash
+# Global --json flag emits NDJSON events to stdout for piping:
+hydra-cli --json swarm "Implement auth middleware"
+
+# Offline tools:
 hydra-cli js "2 + 2"                                                 # Sandboxed JS
 hydra-cli execute --config hydra.json --task "lint" --task "test"    # DAG execution
 hydra-cli index --root . --output code-index.json --languages rs,ts  # AST Indexer

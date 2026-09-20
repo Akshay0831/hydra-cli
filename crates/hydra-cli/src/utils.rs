@@ -1,4 +1,4 @@
-//! Utility functions for CLI parsing
+// CLI parsing utility functions
 
 use anyhow::Result;
 use hydra_dag::ExecutionStrategy;

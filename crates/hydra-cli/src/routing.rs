@@ -62,8 +62,10 @@ pub enum Capability {
                       // Add more as needed
 }
 
-impl Capability {
-    pub fn from_str(s: &str) -> Result<Self> {
+impl std::str::FromStr for Capability {
+    type Err = anyhow::Error;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "tool" => Ok(Capability::Tool(s.to_string())),
             "streaming" => Ok(Capability::Streaming),
@@ -74,6 +76,17 @@ impl Capability {
             "code-execution" => Ok(Capability::CodeExecution),
             _ => anyhow::bail!("unknown capability: {}", s),
         }
+    }
+}
+
+impl Capability {
+    pub fn parse(s: &str) -> Result<Self> {
+        <Self as std::str::FromStr>::from_str(s)
+    }
+
+    #[allow(clippy::should_implement_trait)]
+    pub fn from_str(s: &str) -> Result<Self> {
+        <Self as std::str::FromStr>::from_str(s)
     }
 }
 
@@ -97,18 +110,14 @@ pub struct RoutingConfig {
     pub fallback_mode: FallbackMode,
 }
 
-/// Strategy for handling fallback when primary candidates fail
+/// Fallback strategy when primary candidates fail
 #[derive(Debug, Clone, Eq, PartialEq, Deserialize, Serialize, Default)]
 pub enum FallbackMode {
-    /// Only use explicitly specified candidates
-    Strict,
-    /// Use lower-priority candidates from the same provider
-    Provider,
-    /// Use any lower-priority candidate
+    Strict,  // Only explicitly specified candidates
+    Provider, // Lower-priority from same provider
     #[default]
-    Any,
-    /// Don't attempt fallback, just report the error
-    None,
+    Any,     // Any lower-priority candidate
+    None,    // No fallback, report error
 }
 
 impl RoutingConfig {
@@ -372,11 +381,10 @@ pub fn resolve(candidates: &[Candidate], request: &RoutingRequest) -> Vec<Candid
                 c.provider == candidate.provider
                     && c.model == candidate.model
                     && c.profile == candidate.profile
-            }) {
-                if candidate.preference > existing.preference {
+            })
+                && candidate.preference > existing.preference {
                     *existing = candidate;
                 }
-            }
         }
     }
 
@@ -419,7 +427,9 @@ fn resolve_configured(
     }
 
     // Apply fallback mode filtering
-    let filtered = match fallback_mode {
+    
+
+    match fallback_mode {
         FallbackMode::Strict => {
             // Use only the highest-priority configured candidate.
             resolved.iter().take(1).cloned().collect()
@@ -444,9 +454,7 @@ fn resolve_configured(
             // Only use the first eligible candidate
             resolved.iter().take(1).cloned().collect()
         }
-    };
-
-    filtered
+    }
 }
 
 #[cfg(test)]

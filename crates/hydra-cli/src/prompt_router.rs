@@ -1,4 +1,4 @@
-//! Prompt router with retry logic and failover handling.
+// Prompt router with retry logic and failover handling
 
 use crate::agent_adapter::{AgentAdapter, PromptRequest};
 use crate::error::{ErrorHandler, HydraCliError};
@@ -10,9 +10,8 @@ use serde::{Deserialize, Serialize};
 use std::path::Path;
 use std::sync::Arc;
 
-/// Project goal and architectural invariant registry.
+/// Project goal and architectural invariant registry
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[allow(dead_code)]
 pub struct ProjectGoalRegistry {
     pub project_name: String,
     pub primary_goals: Vec<String>,
@@ -41,16 +40,14 @@ impl Default for ProjectGoalRegistry {
     }
 }
 
-#[allow(dead_code)]
 impl ProjectGoalRegistry {
-    /// Load from .hydra/goals.json or use defaults.
+    /// Load from .hydra/goals.json or use defaults
     pub async fn load_or_default(workspace_root: &Path) -> Self {
         let goals_path = workspace_root.join(".hydra").join("goals.json");
-        if let Ok(content) = tokio::fs::read_to_string(&goals_path).await {
-            if let Ok(registry) = serde_json::from_str(&content) {
+        if let Ok(content) = tokio::fs::read_to_string(&goals_path).await
+            && let Ok(registry) = serde_json::from_str(&content) {
                 return registry;
             }
-        }
         Self::default()
     }
 
@@ -70,10 +67,8 @@ impl ProjectGoalRegistry {
 
 /// Universal KV-cache prefix aligner (Phase 3.5).
 /// Enforces deterministic prompt ordering to maximize provider prompt caching hit rate.
-#[allow(dead_code)]
 pub struct PromptPrefixAligner;
 
-#[allow(dead_code)]
 impl PromptPrefixAligner {
     /// Assemble prompts: system -> invariants -> docs -> AST -> user intent.
     pub fn build_cache_aligned_prompt(
@@ -415,4 +410,39 @@ mod tests {
         assert!(doc_pos < code_pos);
         assert!(code_pos < intent_pos);
     }
+
+    #[test]
+    fn test_prompt_prefix_aligner_minimal_inputs() {
+        let aligned = PromptPrefixAligner::build_cache_aligned_prompt(
+            "System only",
+            "",
+            &[],
+            "",
+            "Intent only",
+        );
+        assert!(aligned.starts_with("System only"));
+        assert!(aligned.ends_with("### TASK INTENT\nIntent only"));
+        assert!(!aligned.contains("REPOSITORY CONTRACTS"));
+        assert!(!aligned.contains("CODE CONTEXT SKELETON"));
+    }
+
+    #[tokio::test]
+    async fn test_project_goal_registry_load_custom() {
+        let dir = tempfile::tempdir().unwrap();
+        let hydra_dir = dir.path().join(".hydra");
+        tokio::fs::create_dir_all(&hydra_dir).await.unwrap();
+
+        let custom_json = r#"{
+            "project_name": "custom-project",
+            "primary_goals": ["Goal 1"],
+            "invariants": ["No unsafe code"],
+            "forbidden_patterns": ["*.tmp"]
+        }"#;
+        tokio::fs::write(hydra_dir.join("goals.json"), custom_json).await.unwrap();
+
+        let registry = ProjectGoalRegistry::load_or_default(dir.path()).await;
+        assert_eq!(registry.project_name, "custom-project");
+        assert_eq!(registry.invariants, vec!["No unsafe code"]);
+    }
 }
+

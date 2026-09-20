@@ -1,7 +1,4 @@
-//! crates/hydra-cli/src/adapters/mod.rs
-//!
-//! Unified adapter facades for external subsystems.
-//! Pattern B: Exactly one adapter interface file per external dependency.
+// Unified adapter facades for external subsystems; one interface per dependency
 
 pub mod litellm;
 pub mod mcp;

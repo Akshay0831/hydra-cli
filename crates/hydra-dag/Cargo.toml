@@ -14,6 +14,7 @@ futures = "0.3"
 
 [dev-dependencies]
 tokio-test = "0.4"
+tempfile = { workspace = true }
 
 [features]
 default = []
