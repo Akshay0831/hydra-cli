@@ -302,7 +302,7 @@ impl fmt::Display for Capability {
     }
 }
 
-#[derive(Debug, Default, Eq, PartialEq)]
+#[derive(Debug, Clone, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct RoutingRequest {
     pub purpose: Option<String>,
     pub required_tools: Vec<String>,
@@ -454,6 +454,230 @@ fn resolve_configured(
             // Only use the first eligible candidate
             resolved.iter().take(1).cloned().collect()
         }
+    }
+}
+
+/// Pluggable strategy selection for model routing
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum ModelSelectorStrategy {
+    #[default]
+    Heuristic,
+    Classifier,
+    Api,
+}
+
+#[async_trait::async_trait]
+pub trait ModelSelector: Send + Sync {
+    async fn select_candidate(
+        &self,
+        request: &RoutingRequest,
+        candidates: &[Candidate],
+    ) -> Result<Candidate>;
+}
+
+/// Heuristic model selector: preserves Hydra's deterministic preference and health ranking.
+#[derive(Debug, Clone, Default)]
+pub struct HeuristicModelSelector;
+
+impl HeuristicModelSelector {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelSelector for HeuristicModelSelector {
+    async fn select_candidate(
+        &self,
+        request: &RoutingRequest,
+        candidates: &[Candidate],
+    ) -> Result<Candidate> {
+        let matching = resolve(candidates, request);
+        let healthy: Vec<Candidate> = matching.into_iter().filter(|c| c.healthy).collect();
+        healthy
+            .into_iter()
+            .max_by_key(|c| c.preference)
+            .ok_or_else(|| anyhow::anyhow!("No eligible healthy candidate found for request"))
+    }
+}
+
+/// Extensible classifier-driven model selector scoring candidates by domain affinity
+#[derive(Debug, Clone)]
+pub struct ClassifierModelSelector {
+    pub classifier_model: String,
+}
+
+impl ClassifierModelSelector {
+    pub fn new(classifier_model: String) -> Self {
+        Self { classifier_model }
+    }
+
+    /// Scores candidates based on task classification heuristics and domain tags
+    pub fn score_candidate(&self, candidate: &Candidate, purpose_text: &str) -> u32 {
+        let text = purpose_text.to_lowercase();
+        let mut score = candidate.preference;
+
+        // Direct designated model match boost
+        if !self.classifier_model.is_empty()
+            && (candidate.model.eq_ignore_ascii_case(&self.classifier_model)
+                || candidate.provider.eq_ignore_ascii_case(&self.classifier_model))
+        {
+            score += 1000;
+        }
+
+        let is_coding = text.contains("code")
+            || text.contains("rust")
+            || text.contains("python")
+            || text.contains("bug")
+            || text.contains("fix")
+            || text.contains("impl")
+            || text.contains("ast");
+        let is_reasoning = text.contains("plan")
+            || text.contains("architect")
+            || text.contains("design")
+            || text.contains("complex");
+        let is_review = text.contains("review")
+            || text.contains("audit")
+            || text.contains("security");
+        let is_context = text.contains("repo")
+            || text.contains("index")
+            || text.contains("large");
+
+        if is_coding
+            && (candidate.purposes.iter().any(|p| p.contains("coding") || p.contains("ast"))
+                || candidate.model.contains("coder"))
+        {
+            score += 500;
+        }
+        if is_reasoning
+            && (candidate.purposes.iter().any(|p| p.contains("architecture") || p.contains("reasoning"))
+                || candidate.capabilities.iter().any(|c| c.contains("reasoning")))
+        {
+            score += 400;
+        }
+        if is_review
+            && (candidate.purposes.iter().any(|p| p.contains("review") || p.contains("audit") || p.contains("security")))
+        {
+            score += 350;
+        }
+        if is_context
+            && (candidate.purposes.iter().any(|p| p.contains("context") || p.contains("analysis"))
+                || candidate.capabilities.iter().any(|c| c.contains("context")))
+        {
+            score += 300;
+        }
+
+        score
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelSelector for ClassifierModelSelector {
+    async fn select_candidate(
+        &self,
+        request: &RoutingRequest,
+        candidates: &[Candidate],
+    ) -> Result<Candidate> {
+        let matching = resolve(candidates, request);
+        let mut healthy: Vec<Candidate> = matching.into_iter().filter(|c| c.healthy).collect();
+        if healthy.is_empty() {
+            healthy = candidates.iter().filter(|c| c.healthy).cloned().collect();
+        }
+        if healthy.is_empty() {
+            anyhow::bail!("No eligible healthy candidate found for request");
+        }
+
+        let purpose_text = request.purpose.as_deref().unwrap_or("");
+        let best = healthy
+            .into_iter()
+            .max_by_key(|c| self.score_candidate(c, purpose_text));
+
+        best.ok_or_else(|| anyhow::anyhow!("Classifier failed to select candidate"))
+    }
+}
+
+/// External API / router model selector with automatic fallback
+#[derive(Debug, Clone)]
+pub struct ApiBasedModelSelector {
+    pub endpoint: String,
+}
+
+impl ApiBasedModelSelector {
+    pub fn new(endpoint: String) -> Self {
+        Self { endpoint }
+    }
+
+    /// Queries external router endpoint via TCP/HTTP probe
+    pub async fn query_endpoint(&self, request: &RoutingRequest, candidates: &[Candidate]) -> Result<Option<Candidate>> {
+        if self.endpoint.is_empty() {
+            return Ok(None);
+        }
+
+        let cleaned = self.endpoint.strip_prefix("http://").unwrap_or(&self.endpoint);
+        let mut parts = cleaned.splitn(2, '/');
+        let host_port = parts.next().unwrap_or("127.0.0.1:4000");
+        let path = format!("/{}", parts.next().unwrap_or(""));
+
+        let stream = match tokio::time::timeout(
+            std::time::Duration::from_millis(600),
+            tokio::net::TcpStream::connect(host_port),
+        ).await {
+            Ok(Ok(stream)) => stream,
+            _ => return Ok(None),
+        };
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut reader, mut writer) = tokio::io::split(stream);
+
+        let body = serde_json::json!({
+            "request": request,
+            "candidates": candidates
+        }).to_string();
+
+        let req_msg = format!(
+            "POST {} HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            path, host_port, body.len(), body
+        );
+
+        if writer.write_all(req_msg.as_bytes()).await.is_err() {
+            return Ok(None);
+        }
+
+        let mut buf = vec![0u8; 4096];
+        if let Ok(Ok(n)) = tokio::time::timeout(std::time::Duration::from_millis(600), reader.read(&mut buf)).await {
+            if n > 0 {
+                let resp_str = String::from_utf8_lossy(&buf[..n]);
+                if let Some(json_start) = resp_str.find("\r\n\r\n") {
+                    let json_body = &resp_str[json_start + 4..];
+                    if let Ok(val) = serde_json::from_str::<serde_json::Value>(json_body) {
+                        let provider = val.get("provider").and_then(|v| v.as_str());
+                        let model = val.get("model").and_then(|v| v.as_str());
+                        if let (Some(p), Some(m)) = (provider, model) {
+                            if let Some(found) = candidates.iter().find(|c| c.provider == p && c.model == m) {
+                                return Ok(Some(found.clone()));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(None)
+    }
+}
+
+#[async_trait::async_trait]
+impl ModelSelector for ApiBasedModelSelector {
+    async fn select_candidate(
+        &self,
+        request: &RoutingRequest,
+        candidates: &[Candidate],
+    ) -> Result<Candidate> {
+        if let Ok(Some(selected)) = self.query_endpoint(request, candidates).await {
+            return Ok(selected);
+        }
+        // Fallback to heuristic if external router endpoint is offline or unavailable
+        HeuristicModelSelector::default().select_candidate(request, candidates).await
     }
 }
 
@@ -892,4 +1116,93 @@ mod tests {
             RoutingConfig::init(&path, false).expect_err("existing config must be protected");
         assert!(error.to_string().contains("use --force"));
     }
+
+    #[tokio::test]
+    async fn test_heuristic_model_selector() {
+        let primary = Candidate::new("openai".into(), "gpt-4".into(), "p1".into()).with_preference(10);
+        let secondary = Candidate::new("anthropic".into(), "claude-3-5".into(), "p2".into()).with_preference(20);
+        let candidates = vec![primary, secondary];
+        let selector = HeuristicModelSelector::new();
+        let req = RoutingRequest::default();
+        let chosen = selector.select_candidate(&req, &candidates).await.expect("select candidate");
+        assert_eq!(chosen.model, "claude-3-5");
+    }
+
+    #[test]
+    fn test_model_selector_strategy_serde() {
+        let strategy = ModelSelectorStrategy::Heuristic;
+        let json = serde_json::to_string(&strategy).expect("serialize");
+        assert_eq!(json, "\"Heuristic\"");
+        let deserialized: ModelSelectorStrategy = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(deserialized, ModelSelectorStrategy::Heuristic);
+    }
+
+    #[tokio::test]
+    async fn test_classifier_model_selector_domain_routing() {
+        let mut coding_model = Candidate::new("qwen".into(), "qwen-2.5-coder".into(), "p1".into()).with_preference(10);
+        coding_model.purposes = vec!["coding".into(), "ast-reasoning".into()];
+
+        let mut general_model = Candidate::new("openai".into(), "gpt-4o".into(), "p2".into()).with_preference(20);
+        general_model.purposes = vec!["architecture".into()];
+
+        let candidates = vec![general_model, coding_model];
+        let selector = ClassifierModelSelector::new("".into());
+
+        // For coding purpose, coding_model receives affinity boost even though base preference is lower
+        let req = RoutingRequest {
+            purpose: Some("fix bug in ast code".into()),
+            ..Default::default()
+        };
+        let chosen = selector.select_candidate(&req, &candidates).await.expect("select");
+        assert_eq!(chosen.model, "qwen-2.5-coder");
+
+        // Explicit model assignment boost
+        let explicit_selector = ClassifierModelSelector::new("gpt-4o".into());
+        let chosen_explicit = explicit_selector.select_candidate(&req, &candidates).await.expect("select");
+        assert_eq!(chosen_explicit.model, "gpt-4o");
+    }
+
+    #[tokio::test]
+    async fn test_api_based_model_selector_fallback() {
+        let primary = Candidate::new("openai".into(), "gpt-4".into(), "p1".into()).with_preference(10);
+        let secondary = Candidate::new("anthropic".into(), "claude-3-5".into(), "p2".into()).with_preference(20);
+        let candidates = vec![primary, secondary];
+
+        // Unreachable endpoint falls back to Heuristic
+        let selector = ApiBasedModelSelector::new("http://127.0.0.1:59999/route".into());
+        let req = RoutingRequest::default();
+        let chosen = selector.select_candidate(&req, &candidates).await.expect("select");
+        assert_eq!(chosen.model, "claude-3-5");
+    }
+
+    #[tokio::test]
+    async fn test_classifier_model_selector_all_candidates_filtered_fallback() {
+        // Purpose mismatch causes resolve() to return empty, but healthy candidate fallback activates
+        let mut model_a = Candidate::new("openai".into(), "model-a".into(), "p1".into()).with_preference(10);
+        model_a.purposes = vec!["strictly-vision".into()];
+
+        let candidates = vec![model_a];
+        let selector = ClassifierModelSelector::new("".into());
+
+        let req = RoutingRequest {
+            purpose: Some("strictly-text".into()),
+            ..Default::default()
+        };
+        let chosen = selector.select_candidate(&req, &candidates).await.expect("fallback selection");
+        assert_eq!(chosen.model, "model-a");
+    }
+
+    #[test]
+    fn test_all_model_selector_strategies_serde() {
+        for strategy in [
+            ModelSelectorStrategy::Heuristic,
+            ModelSelectorStrategy::Classifier,
+            ModelSelectorStrategy::Api,
+        ] {
+            let json = serde_json::to_string(&strategy).expect("serialize");
+            let deserialized: ModelSelectorStrategy = serde_json::from_str(&json).expect("deserialize");
+            assert_eq!(deserialized, strategy);
+        }
+    }
 }
+

@@ -45,6 +45,12 @@ impl ScopeConstraint {
             return false; // Default to deny for security
         }
 
+        // Invariant: Agent cannot mutate protected safety configurations
+        if crate::security::CommandSafetyPolicy::default().is_path_protected(target_path) {
+            tracing::warn!(target_path = ?target_path, "Security: Denied write to protected safety configuration");
+            return false;
+        }
+
         // Check for absolute paths outside allowed directories
         if target_path.is_absolute()
             && !self
@@ -83,6 +89,16 @@ impl ScopeConstraint {
     /// Blocks spurious wrapper files; forces module extension.
     pub fn validate_file_creation(&self, proposed_path: &Path) -> Result<(), String> {
         tracing::debug!(proposed_path = ?proposed_path, "Security: Validating file creation");
+
+        // Invariant: Agent cannot create or overwrite protected safety configurations
+        if crate::security::CommandSafetyPolicy::default().is_path_protected(proposed_path) {
+            tracing::warn!(proposed_path = ?proposed_path, "Security: Denied file creation for protected safety configuration");
+            return Err(format!(
+                "REJECTED: File creation '{}' blocked because it targets a protected safety configuration.",
+                proposed_path.display()
+            ));
+        }
+
         let file_name = proposed_path
             .file_name()
             .and_then(|f| f.to_str())
@@ -363,5 +379,16 @@ mod tests {
                 .validate_file_creation(&PathBuf::from("src/ast_parser.rs"))
                 .is_ok()
         );
+        assert!(
+            scope
+                .validate_file_creation(&PathBuf::from(".hydra/safety.json"))
+                .is_err()
+        );
+        assert!(
+            scope
+                .validate_file_creation(&PathBuf::from("hydra.json"))
+                .is_err()
+        );
     }
 }
+

@@ -8,6 +8,7 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::{Mutex, RwLock, watch};
 
+use crate::docs::DocContextInjector;
 use crate::orchestrator::steering::{DecisionBrief, DecisionOption, DecisionSeam};
 
 /// Cooperative cancellation token with instant cancellation
@@ -169,6 +170,7 @@ pub struct DaemonState {
     pub pending_decisions: RwLock<HashMap<String, DecisionBrief>>,
     pub resolved_decisions: RwLock<HashMap<String, DecisionOption>>,
     pub diff_cache: RwLock<HashMap<String, String>>,
+    pub session_manager: Arc<crate::session::SessionManager>,
 }
 
 impl Default for DaemonState {
@@ -184,6 +186,7 @@ impl DaemonState {
             pending_decisions: RwLock::new(HashMap::new()),
             resolved_decisions: RwLock::new(HashMap::new()),
             diff_cache: RwLock::new(HashMap::new()),
+            session_manager: Arc::new(crate::session::SessionManager::new(std::path::PathBuf::from("."))),
         }
     }
 
@@ -720,6 +723,161 @@ pub async fn dispatch_json_rpc(state: &Arc<DaemonState>, req: JsonRpcRequest) ->
                 },
             }
         }
+        "session.create" => {
+            let config = if let Some(cfg_val) = req.params.get("config") {
+                serde_json::from_value::<crate::session::SessionConfig>(cfg_val.clone())
+                    .unwrap_or_default()
+            } else {
+                crate::session::SessionConfig::default()
+            };
+            match state.session_manager.create_session(config).await {
+                Ok(session_id) => JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id,
+                    result: Some(serde_json::json!({
+                        "session_id": session_id,
+                        "status": "created"
+                    })),
+                    error: None,
+                },
+                Err(e) => JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32004,
+                        message: format!("failed to create session: {e}"),
+                        data: None,
+                    }),
+                },
+            }
+        }
+        "session.send_message" => {
+            let session_id = req
+                .params
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let role = req
+                .params
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("user");
+            let content = req
+                .params
+                .get("content")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+
+            let turn = crate::session::ConversationTurn::new(role, content);
+            match state.session_manager.add_turn(session_id, turn).await {
+                Ok(()) => JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id,
+                    result: Some(serde_json::json!({
+                        "session_id": session_id,
+                        "status": "recorded"
+                    })),
+                    error: None,
+                },
+                Err(e) => JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32004,
+                        message: format!("failed to add turn: {e}"),
+                        data: None,
+                    }),
+                },
+            }
+        }
+        "session.get_history" => {
+            let session_id = req
+                .params
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if let Some(session) = state.session_manager.get_session(session_id).await {
+                JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id,
+                    result: Some(serde_json::to_value(session.turns).unwrap_or_default()),
+                    error: None,
+                }
+            } else {
+                JsonRpcResponse {
+                    jsonrpc: "2.0".to_string(),
+                    id,
+                    result: None,
+                    error: Some(JsonRpcError {
+                        code: -32004,
+                        message: format!("session '{session_id}' not found"),
+                        data: None,
+                    }),
+                }
+            }
+        }
+        "session.list" => {
+            let list = if let Some(root) = req.params.get("root").and_then(|v| v.as_str()) {
+                state.session_manager.list_sessions_for_workspace(std::path::Path::new(root))
+            } else {
+                state.session_manager.list_sessions()
+            };
+            JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: Some(serde_json::to_value(list).unwrap_or_default()),
+                error: None,
+            }
+        }
+        "harness.evaluate_command" => {
+            let command = req
+                .params
+                .get("command")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let root = req
+                .params
+                .get("root")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            let policy = crate::security::CommandSafetyPolicy::load_from_workspace(
+                std::path::Path::new(root),
+            )
+            .unwrap_or_default();
+            let harness = crate::harness::ToolExecutionHarness::new(
+                crate::harness::ApprovalMode::RulesBased,
+                policy,
+            );
+            let decision = harness.authorize_command(command);
+            JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: Some(serde_json::to_value(decision).unwrap_or_default()),
+                error: None,
+            }
+        }
+        "docs.get_invariants" => {
+            let root = req
+                .params
+                .get("root")
+                .and_then(|v| v.as_str())
+                .unwrap_or(".");
+            let intent = req
+                .params
+                .get("intent")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let injector = crate::docs::AiDenseConciseDocInjector::new();
+            let docs = injector.extract_documentation(std::path::Path::new(root), intent);
+            JsonRpcResponse {
+                jsonrpc: "2.0".to_string(),
+                id,
+                result: Some(serde_json::to_value(docs).unwrap_or_default()),
+                error: None,
+            }
+        }
         "status" => JsonRpcResponse {
             jsonrpc: "2.0".to_string(),
             id,
@@ -1088,6 +1246,146 @@ mod tests {
         assert!(resp.error.is_some());
         assert_eq!(resp.error.unwrap().code, -32602);
     }
+
+    #[tokio::test]
+    async fn test_json_rpc_session_lifecycle_and_harness() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let state = Arc::new(DaemonState {
+            active_tokens: Mutex::new(HashMap::new()),
+            pending_decisions: RwLock::new(HashMap::new()),
+            resolved_decisions: RwLock::new(HashMap::new()),
+            diff_cache: RwLock::new(HashMap::new()),
+            session_manager: Arc::new(crate::session::SessionManager::new(temp.path().to_path_buf())),
+        });
+
+        // 1. session.create
+        let create_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(101)),
+            method: "session.create".to_string(),
+            params: serde_json::json!({}),
+        };
+        let create_resp = dispatch_json_rpc(&state, create_req).await;
+        assert!(create_resp.error.is_none());
+        let session_id = create_resp
+            .result
+            .unwrap()
+            .get("session_id")
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string();
+
+        // 2. session.send_message
+        let send_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(102)),
+            method: "session.send_message".to_string(),
+            params: serde_json::json!({
+                "session_id": session_id,
+                "role": "user",
+                "content": "Hello AI"
+            }),
+        };
+        let send_resp = dispatch_json_rpc(&state, send_req).await;
+        assert!(send_resp.error.is_none());
+
+        // 3. session.get_history
+        let hist_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(103)),
+            method: "session.get_history".to_string(),
+            params: serde_json::json!({ "session_id": session_id }),
+        };
+        let hist_resp = dispatch_json_rpc(&state, hist_req).await;
+        assert!(hist_resp.error.is_none());
+        let turns: Vec<crate::session::ConversationTurn> =
+            serde_json::from_value(hist_resp.result.unwrap()).unwrap();
+        assert_eq!(turns.len(), 1);
+        assert_eq!(turns[0].content, "Hello AI");
+
+        // 4. harness.evaluate_command
+        let harness_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(104)),
+            method: "harness.evaluate_command".to_string(),
+            params: serde_json::json!({ "command": "git status" }),
+        };
+        let harness_resp = dispatch_json_rpc(&state, harness_req).await;
+        assert!(harness_resp.error.is_none());
+        assert_eq!(harness_resp.result.unwrap(), serde_json::json!("Approved"));
+    }
+
+    #[tokio::test]
+    async fn test_json_rpc_session_list_with_root_filter() {
+        let temp_a = tempfile::tempdir().expect("tempdir");
+        let temp_b = tempfile::tempdir().expect("tempdir");
+
+        let s_a = crate::session::Session::new("sess_in_a".into(), temp_a.path().to_path_buf(), crate::session::SessionConfig::default());
+        s_a.save().expect("save s_a");
+
+        let s_b = crate::session::Session::new("sess_in_b".into(), temp_b.path().to_path_buf(), crate::session::SessionConfig::default());
+        s_b.save().expect("save s_b");
+
+        let state = Arc::new(DaemonState {
+            active_tokens: Mutex::new(HashMap::new()),
+            pending_decisions: RwLock::new(HashMap::new()),
+            resolved_decisions: RwLock::new(HashMap::new()),
+            diff_cache: RwLock::new(HashMap::new()),
+            session_manager: Arc::new(crate::session::SessionManager::new(temp_a.path().to_path_buf())),
+        });
+
+        // Query session.list with root = temp_b
+        let list_b_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(201)),
+            method: "session.list".to_string(),
+            params: serde_json::json!({ "root": temp_b.path().to_str().unwrap() }),
+        };
+        let list_b_resp = dispatch_json_rpc(&state, list_b_req).await;
+        assert!(list_b_resp.error.is_none());
+        let sessions: Vec<String> = serde_json::from_value(list_b_resp.result.unwrap()).unwrap();
+        assert_eq!(sessions, vec!["sess_in_b".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn test_json_rpc_docs_get_invariants_intent() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let hydra_dir = temp.path().join(".hydra");
+        std::fs::create_dir_all(&hydra_dir).expect("mkdir");
+        let goals_file = hydra_dir.join("goals.json");
+        std::fs::write(
+            &goals_file,
+            r#"{"project_name":"test","primary_goals":[],"invariants":["Zero unwrap in production","Deterministic graph walks"],"forbidden_patterns":[]}"#,
+        )
+        .expect("write goals");
+
+        let state = Arc::new(DaemonState {
+            active_tokens: Mutex::new(HashMap::new()),
+            pending_decisions: RwLock::new(HashMap::new()),
+            resolved_decisions: RwLock::new(HashMap::new()),
+            diff_cache: RwLock::new(HashMap::new()),
+            session_manager: Arc::new(crate::session::SessionManager::new(temp.path().to_path_buf())),
+        });
+
+        let docs_req = JsonRpcRequest {
+            jsonrpc: "2.0".to_string(),
+            id: Some(serde_json::json!(301)),
+            method: "docs.get_invariants".to_string(),
+            params: serde_json::json!({
+                "root": temp.path().to_str().unwrap(),
+                "intent": "eliminate unwrap calls"
+            }),
+        };
+        let docs_resp = dispatch_json_rpc(&state, docs_req).await;
+        assert!(docs_resp.error.is_none());
+        let docs: Vec<String> = serde_json::from_value(docs_resp.result.unwrap()).unwrap();
+        assert_eq!(docs.len(), 1);
+        assert!(docs[0].contains("INTENT MATCHED"));
+        assert!(docs[0].contains("Zero unwrap in production"));
+        assert!(!docs[0].contains("Deterministic graph walks"));
+    }
 }
+
 
 

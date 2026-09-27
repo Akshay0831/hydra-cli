@@ -51,6 +51,16 @@ impl ProjectGoalRegistry {
         Self::default()
     }
 
+    /// Synchronous loader for non-async context builders
+    pub fn load_or_default_sync(workspace_root: &Path) -> Self {
+        let goals_path = workspace_root.join(".hydra").join("goals.json");
+        if let Ok(content) = std::fs::read_to_string(&goals_path)
+            && let Ok(registry) = serde_json::from_str(&content) {
+                return registry;
+            }
+        Self::default()
+    }
+
     /// Format goals and invariants for prompt injection.
     pub fn format_invariant_header(&self) -> String {
         let mut out = Vec::new();

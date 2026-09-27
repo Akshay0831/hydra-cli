@@ -30,6 +30,7 @@ thiserror = "1.0"
 tempfile = { workspace = true }
 tracing = { workspace = true }
 walkdir = { workspace = true }
+uuid = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

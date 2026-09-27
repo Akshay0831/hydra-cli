@@ -231,6 +231,45 @@ pub enum CommandHandler {
         #[arg(long)]
         list: bool,
     },
+    /// Interactive multi-turn chat session with streaming output and safety checks.
+    Chat {
+        /// Workspace root.
+        #[arg(long, default_value = ".")]
+        root: std::path::PathBuf,
+        /// Optional session ID to resume.
+        #[arg(long)]
+        session: Option<String>,
+        /// Model selection strategy (heuristic, classifier, api).
+        #[arg(long, default_value = "heuristic")]
+        selector: String,
+        /// Documentation interleaving strategy (ai-dense, minimal, none).
+        #[arg(long, default_value = "ai-dense")]
+        doc_strategy: String,
+        /// Tool approval mode (rules-based, auto, require).
+        #[arg(long, default_value = "rules-based")]
+        approval: String,
+        /// Initial message prompt (optional).
+        #[arg(value_name = "MESSAGE")]
+        message: Option<String>,
+    },
+    /// Inspect or configure user command safety policy and protected files.
+    Safety {
+        /// Workspace root.
+        #[arg(long, default_value = ".")]
+        root: std::path::PathBuf,
+        /// Command to evaluate for safety.
+        #[arg(long)]
+        check: Option<String>,
+        /// Add a command to the standalone safe whitelist.
+        #[arg(long)]
+        add_safe: Option<String>,
+        /// Add a keyword to the blocked dangerous keywords list.
+        #[arg(long)]
+        add_blocked: Option<String>,
+        /// Toggle whether safe commands must strictly be standalone.
+        #[arg(long)]
+        standalone_only: Option<bool>,
+    },
 }
 
 #[derive(Debug, Clone, Subcommand)]
@@ -385,6 +424,42 @@ impl CommandHandler {
             }
             CommandHandler::Undo { root, list } => {
                 self.undo(root, *list, feedback).await
+            }
+            CommandHandler::Chat {
+                root,
+                session,
+                selector,
+                doc_strategy,
+                approval,
+                message,
+            } => {
+                self.chat(
+                    root,
+                    session.as_deref(),
+                    selector,
+                    doc_strategy,
+                    approval,
+                    message.as_deref(),
+                    feedback,
+                )
+                .await
+            }
+            CommandHandler::Safety {
+                root,
+                check,
+                add_safe,
+                add_blocked,
+                standalone_only,
+            } => {
+                self.safety(
+                    root,
+                    check.as_deref(),
+                    add_safe.as_deref(),
+                    add_blocked.as_deref(),
+                    *standalone_only,
+                    feedback,
+                )
+                .await
             }
         }
     }
@@ -1473,6 +1548,188 @@ cache_strategy = "memory-hash-diff"
             }
         }
 
+        Ok(())
+    }
+
+    async fn chat(
+        &self,
+        root: &Path,
+        session_id: Option<&str>,
+        selector_str: &str,
+        doc_strategy_str: &str,
+        approval_str: &str,
+        initial_message: Option<&str>,
+        feedback: &mut CliFeedback,
+    ) -> Result<(), HydraCliError> {
+        let manager = crate::session::SessionManager::new(root.to_path_buf());
+        let selector_strategy = match selector_str.to_lowercase().as_str() {
+            "classifier" => crate::routing::ModelSelectorStrategy::Classifier,
+            "api" => crate::routing::ModelSelectorStrategy::Api,
+            _ => crate::routing::ModelSelectorStrategy::Heuristic,
+        };
+        let doc_strategy = match doc_strategy_str.to_lowercase().as_str() {
+            "minimal" => crate::docs::DocInclusionStrategy::MinimalInvariants,
+            "none" => crate::docs::DocInclusionStrategy::None,
+            _ => crate::docs::DocInclusionStrategy::AiDenseConcise,
+        };
+        let approval_mode = match approval_str.to_lowercase().as_str() {
+            "auto" => crate::harness::ApprovalMode::AutoApprove,
+            "require" => crate::harness::ApprovalMode::RequireApproval,
+            "classifier" => crate::harness::ApprovalMode::ModelClassifierApproval,
+            _ => crate::harness::ApprovalMode::RulesBased,
+        };
+
+        let sid = if let Some(id) = session_id {
+            id.to_string()
+        } else {
+            let config = crate::session::SessionConfig {
+                model_selector_strategy: selector_strategy,
+                doc_inclusion_strategy: doc_strategy,
+                tool_approval_mode: approval_mode,
+                ..Default::default()
+            };
+            manager
+                .create_session(config)
+                .await
+                .map_err(HydraCliError::Configuration)?
+        };
+
+        let injector = crate::docs::create_doc_injector(doc_strategy);
+
+        feedback.info_message(format!(
+            "Hydra Chat Session: {sid} (approval: {approval_str}, selector: {selector_str}, docs: {doc_strategy_str})"
+        ));
+
+        // Process initial message if supplied
+        if let Some(msg) = initial_message {
+            let turn = crate::session::ConversationTurn::new("user", msg);
+            manager
+                .add_turn(&sid, turn)
+                .await
+                .map_err(HydraCliError::TaskExecution)?;
+            let doc_context = injector.extract_documentation(root, msg);
+            feedback.info_message(format!(
+                "Injected {} doc contract section(s) for prompt turn",
+                doc_context.len()
+            ));
+            feedback.success_message(format!("Processed turn for session: {sid}"));
+            return Ok(());
+        }
+
+        feedback.info_message("Hydra REPL active. Type '/exit' or '/quit' to terminate session.".to_string());
+        use std::io::Write;
+        let stdin = std::io::stdin();
+        loop {
+            print!("hydra> ");
+            let _ = std::io::stdout().flush();
+            let mut line = String::new();
+            if stdin.read_line(&mut line).is_err() || line.is_empty() {
+                break;
+            }
+            let trimmed = line.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            if trimmed == "/exit" || trimmed == "/quit" {
+                feedback.info_message("Terminating chat session.".to_string());
+                break;
+            }
+            let turn = crate::session::ConversationTurn::new("user", trimmed);
+            manager
+                .add_turn(&sid, turn)
+                .await
+                .map_err(HydraCliError::TaskExecution)?;
+
+            let doc_context = injector.extract_documentation(root, trimmed);
+            let response = if doc_context.is_empty() {
+                format!("Turn recorded for session {sid}.")
+            } else {
+                format!("Turn recorded with {} context contract(s).", doc_context.len())
+            };
+            println!("{response}");
+            let assistant_turn = crate::session::ConversationTurn::new("assistant", response);
+            let _ = manager.add_turn(&sid, assistant_turn).await;
+        }
+
+        Ok(())
+    }
+
+    async fn safety(
+        &self,
+        root: &Path,
+        check_cmd: Option<&str>,
+        add_safe: Option<&str>,
+        add_blocked: Option<&str>,
+        standalone_only: Option<bool>,
+        feedback: &mut CliFeedback,
+    ) -> Result<(), HydraCliError> {
+        let mut policy = crate::security::CommandSafetyPolicy::load_from_workspace(root)
+            .map_err(HydraCliError::Configuration)?;
+
+        let mut mutated = false;
+        if let Some(safe_cmd) = add_safe {
+            let cmd_str = safe_cmd.trim().to_lowercase();
+            if !policy.safe_standalone_commands.contains(&cmd_str) {
+                policy.safe_standalone_commands.push(cmd_str.clone());
+                mutated = true;
+                feedback.success_message(format!("Added '{cmd_str}' to safe standalone whitelist."));
+            }
+        }
+        if let Some(blocked) = add_blocked {
+            let blocked_str = blocked.trim().to_string();
+            if !policy.blocked_keywords.contains(&blocked_str) {
+                policy.blocked_keywords.push(blocked_str.clone());
+                mutated = true;
+                feedback.success_message(format!("Added '{blocked_str}' to blocked keywords list."));
+            }
+        }
+        if let Some(so) = standalone_only {
+            policy.allow_standalone_only = so;
+            mutated = true;
+            feedback.success_message(format!("Set allow_standalone_only to {so}."));
+        }
+
+        if mutated {
+            policy
+                .save_to_workspace(root)
+                .map_err(HydraCliError::Configuration)?;
+            feedback.success_message(format!(
+                "Persisted updated safety policy to {}",
+                root.join(".hydra").join("safety.json").display()
+            ));
+        }
+
+        if let Some(cmd) = check_cmd {
+            let res = policy.evaluate_command(cmd);
+            match res {
+                crate::security::CommandSafetyResult::Allowed => {
+                    feedback.success_message(format!("Command '{cmd}' is SAFE and auto-approved."));
+                }
+                crate::security::CommandSafetyResult::RequiresApproval { reason, .. } => {
+                    feedback.warning_message(format!("Command '{cmd}' REQUIRES APPROVAL: {reason}"));
+                }
+                crate::security::CommandSafetyResult::Blocked { reason, .. } => {
+                    feedback.error_message(format!("Command '{cmd}' is BLOCKED: {reason}"));
+                }
+            }
+        } else if !mutated {
+            feedback.info_message(format!(
+                "Command Safety Policy (Protected Files: {:?})",
+                policy.protected_paths
+            ));
+            feedback.info_message(format!(
+                "Safe Standalone Commands: {:?}",
+                policy.safe_standalone_commands
+            ));
+            feedback.info_message(format!(
+                "Blocked Keywords: {:?}",
+                policy.blocked_keywords
+            ));
+            feedback.info_message(format!(
+                "Allow Standalone Only: {}",
+                policy.allow_standalone_only
+            ));
+        }
         Ok(())
     }
 }

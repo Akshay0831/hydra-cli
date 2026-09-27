@@ -2,6 +2,36 @@
 
 ---
 
+## [0.4.0] — 2026-09-25
+
+### Tamper-Proof Command Safety Policy
+- User-configurable safety rules (`.hydra/safety.json`) governing shell command executions.
+- Safe standalone commands (`ls`, `dir`, `pwd`, `git`, `cargo`, `cat`, etc.) are auto-approved strictly when single commands.
+- Chained commands (`&&`, `;`, `||`, `|`, `$(...)`, subshells) or blocked keywords (`rm -rf`, `sudo`, `dd`) require explicit confirmation or are blocked.
+- AI agents are strictly forbidden from modifying or creating protected safety configuration files (`.hydra/safety.json`, `hydra.json`, `.hydra/goals.json`) via `validate_file_mutation` and `validate_file_creation`.
+- CLI policy management via `hydra-cli safety` with `--add-safe`, `--add-blocked`, and `--standalone-only` flags for direct workspace policy persistence.
+
+### Pluggable Model Selection
+- Introduced `ModelSelector` trait supporting selectable strategies: `Heuristic` (default), `Classifier`, and `Api`.
+- Preserves full deterministic candidate matching across preferences, health status, and capabilities with automatic healthy-candidate fallback.
+- Preconfigured 7-provider gateway configuration in `hydra.json` (`openai`, `anthropic`, `qwen`, `deepseek`, `zhipu`, `gemini`, `ollama`) with `$ENV:*` credential resolution.
+
+### Selectable AI-Dense Documentation Interleaving
+- Context injector adhering to `docs/profiles/ai-dense.toml` for token-efficient prompt construction (`AiDenseConcise`, `MinimalInvariants`, `None`).
+- Relevance-matched documentation extraction tokenizes intent to interleave only pertinent architectural invariants, falling back to full invariant sets on general queries.
+- Integrates directly with `ProjectGoalRegistry` and `PromptPrefixAligner` without prose fluff.
+
+### Copilot-Style Tool Execution Harness
+- `ToolExecutionHarness` with selectable approval modes: `RulesBased` (default), `AutoApprove`, `RequireApproval`, and `ModelClassifierApproval`.
+- `ModelClassifierApproval` audits commands for suspicious network, environment variable dumping, or shell evasion patterns (`curl`, `wget`, `nc`, `ncat`, `invoke-webrequest`, `iwr`, `chmod 777`, `env`, `printenv`, `powershell -enc`, `cmd /c`).
+
+### Multi-Turn Session Engine & Interactive REPL
+- Full session persistence in `.hydra/sessions/` with automatic context window compaction and `list_sessions_for_workspace` root isolation.
+- New `hydra-cli chat` interactive REPL loop and `hydra-cli safety` policy inspection commands.
+- Headless JSON-RPC 2.0 daemon endpoints for session management (`session.create`, `session.send_message`, `session.get_history`, `session.list` with root filter), command evaluation (`harness.evaluate_command`), and documentation invariants (`docs.get_invariants` with intent filter).
+
+---
+
 ## [0.3.2] — 2026-09-20
 
 ### Use Hydra as a Library

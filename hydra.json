@@ -1,4 +1,90 @@
 {
-  "candidates": [],
-  "profiles": {}
+  "candidates": [
+    {
+      "provider": "openai",
+      "model": "gpt-4o",
+      "profile": "default",
+      "purposes": ["architecture", "refactoring"],
+      "capabilities": ["streaming", "structured", "reasoning"],
+      "preference": 100,
+      "healthy": true
+    },
+    {
+      "provider": "anthropic",
+      "model": "claude-3-5-sonnet-20241022",
+      "profile": "default",
+      "purposes": ["code-review", "security"],
+      "capabilities": ["streaming", "structured", "reasoning"],
+      "preference": 95,
+      "healthy": true
+    },
+    {
+      "provider": "qwen",
+      "model": "qwen-2.5-coder-32b-instruct",
+      "profile": "default",
+      "purposes": ["coding", "ast-reasoning"],
+      "capabilities": ["streaming", "structured", "code-execution"],
+      "preference": 90,
+      "healthy": true
+    },
+    {
+      "provider": "deepseek",
+      "model": "deepseek-coder",
+      "profile": "default",
+      "purposes": ["coding", "autonomous-swarm"],
+      "capabilities": ["streaming", "structured"],
+      "preference": 85,
+      "healthy": true
+    },
+    {
+      "provider": "zhipu",
+      "model": "glm-4-plus",
+      "profile": "default",
+      "purposes": ["code-audit", "verification"],
+      "capabilities": ["streaming", "structured"],
+      "preference": 80,
+      "healthy": true
+    },
+    {
+      "provider": "gemini",
+      "model": "gemini-2.5-pro",
+      "profile": "default",
+      "purposes": ["large-context", "repo-analysis"],
+      "capabilities": ["streaming", "large-context", "vision"],
+      "preference": 75,
+      "healthy": true
+    },
+    {
+      "provider": "ollama",
+      "model": "qwen2.5-coder:7b",
+      "profile": "default",
+      "purposes": ["offline", "air-gapped"],
+      "capabilities": ["streaming"],
+      "preference": 50,
+      "healthy": true
+    }
+  ],
+  "profiles": {
+    "default": {
+      "credentials": {
+        "openai": "$ENV:OPENAI_API_KEY",
+        "anthropic": "$ENV:ANTHROPIC_API_KEY",
+        "qwen": "$ENV:DASHSCOPE_API_KEY",
+        "deepseek": "$ENV:DEEPSEEK_API_KEY",
+        "zhipu": "$ENV:ZHIPUAI_API_KEY",
+        "gemini": "$ENV:GEMINI_API_KEY",
+        "ollama": "literal:none"
+      },
+      "models": [
+        "gpt-4o",
+        "claude-3-5-sonnet-20241022",
+        "qwen-2.5-coder-32b-instruct",
+        "deepseek-coder",
+        "glm-4-plus",
+        "gemini-2.5-pro",
+        "qwen2.5-coder:7b"
+      ]
+    }
+  },
+  "fallback_mode": "Any"
 }
